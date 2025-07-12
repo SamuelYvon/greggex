@@ -1,6 +1,6 @@
-use crate::postfix::GregexpSegment;
+use crate::postfix::GregExpSegment;
 use std::cell::OnceCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::rc::{Rc, Weak};
 use thiserror::Error;
 
@@ -30,6 +30,11 @@ pub enum Node {
         value: char,
         next: OnceCell<Weak<Node>>,
     },
+    CharsetMatch {
+        id: usize,
+        charset: HashSet<char>,
+        next: OnceCell<Weak<Node>>,
+    },
     Choice {
         id: usize,
         outs: [OnceCell<Weak<Node>>; 2],
@@ -43,6 +48,7 @@ impl Node {
     pub fn id(&self) -> usize {
         *match self {
             Node::LiteralMatch { id, .. } => id,
+            Node::CharsetMatch { id, .. } => id,
             Node::Choice { id, .. } => id,
             Node::Matching { id, .. } => id,
         }
@@ -91,6 +97,28 @@ fn compile_character(
     *next_id += 1;
 }
 
+fn compile_charset(
+    charset: HashSet<char>,
+    state_table: &mut NodeTable,
+    stack: &mut Vec<Fragment>,
+    next_id: &mut usize,
+) {
+    let node = Rc::new(Node::CharsetMatch {
+        id: *next_id,
+        charset,
+        next: OnceCell::new(),
+    });
+
+    state_table.insert(*next_id, node.clone());
+
+    stack.push(Fragment {
+        node,
+        outputs: vec![NodeOutput::Simple(*next_id)],
+    });
+
+    *next_id += 1;
+}
+
 /// Link a fragment to the given node.
 fn attach_all(from: &Fragment, to: &Rc<Node>, node_table: &NodeTable) -> CompilationResult<()> {
     for output in from.outputs.iter() {
@@ -101,7 +129,7 @@ fn attach_all(from: &Fragment, to: &Rc<Node>, node_table: &NodeTable) -> Compila
                     .ok_or(CompilationError::BadLookup(*node_id))?;
 
                 match node.as_ref() {
-                    Node::LiteralMatch { next, .. } => {
+                    Node::LiteralMatch { next, .. } | Node::CharsetMatch { next, .. } => {
                         next.set(Rc::downgrade(to))
                             .map_err(|_| CompilationError::DoubleSetOuput(*node_id))?;
                     }
@@ -121,7 +149,9 @@ fn attach_all(from: &Fragment, to: &Rc<Node>, node_table: &NodeTable) -> Compila
                             .set(Rc::downgrade(to))
                             .map_err(|_| CompilationError::DoubleSetOuput(*node_id))?;
                     }
-                    Node::LiteralMatch { .. } | Node::Matching { .. } => {
+                    Node::LiteralMatch { .. }
+                    | Node::CharsetMatch { .. }
+                    | Node::Matching { .. } => {
                         Err(CompilationError::ExpectedChoiceOutput(*node_id))?;
                     }
                 }
@@ -249,7 +279,7 @@ fn attach_matching_node(
     Ok(last.node.id())
 }
 
-pub fn compile(postfix: &Vec<GregexpSegment>) -> CompilationResult<Gregexp> {
+pub fn compile(postfix: &Vec<GregExpSegment>) -> CompilationResult<Gregexp> {
     let mut node_table: NodeTable = HashMap::new();
 
     let mut next_id = 0;
@@ -257,17 +287,20 @@ pub fn compile(postfix: &Vec<GregexpSegment>) -> CompilationResult<Gregexp> {
 
     for segment in postfix {
         match segment {
-            GregexpSegment::Character(c) => {
+            GregExpSegment::Character(c) => {
                 compile_character(*c, &mut node_table, &mut stack, &mut next_id)
             }
-            GregexpSegment::Concat => compile_concat(&node_table, &mut stack)?,
-            GregexpSegment::AtMostOnce => {
+            GregExpSegment::Concat => compile_concat(&node_table, &mut stack)?,
+            GregExpSegment::AtMostOnce => {
                 compile_at_most_once(&mut node_table, &mut stack, &mut next_id)?
             }
-            GregexpSegment::AtLeastOnce => {
+            GregExpSegment::AtLeastOnce => {
                 compile_at_least_once(&mut node_table, &mut stack, &mut next_id)?
             }
-            GregexpSegment::Star => compile_star(&mut node_table, &mut stack, &mut next_id)?,
+            GregExpSegment::Star => compile_star(&mut node_table, &mut stack, &mut next_id)?,
+            GregExpSegment::Set(charset) => {
+                compile_charset(charset.clone(), &mut node_table, &mut stack, &mut next_id)
+            }
         }
     }
 
@@ -292,12 +325,23 @@ pub fn compile_to_dot(exp: &Gregexp) -> String {
     for node in nodes.values() {
         match node.as_ref() {
             Node::LiteralMatch { id, next, value } => {
-                match next.get().map(Weak::upgrade).flatten() {
-                    None => continue,
-                    Some(next) => {
-                        builder += &format!("\ta{id} -> a{0}[label=\"{value}\"]\n", next.id());
-                    }
-                };
+                let next = next
+                    .get()
+                    .map(Weak::upgrade)
+                    .flatten()
+                    .expect("Expected a next link");
+                builder += &format!("\ta{id} -> a{0}[label=\"{value}\"]\n", next.id());
+            }
+            Node::CharsetMatch { id, next, charset } => {
+                let next = next
+                    .get()
+                    .map(Weak::upgrade)
+                    .flatten()
+                    .expect("Expected a next link");
+
+                for value in charset {
+                    builder += &format!("\ta{id} -> a{0}[label=\"{value}\"]\n", next.id());
+                }
             }
             Node::Choice { id, outs } => {
                 for out in outs {

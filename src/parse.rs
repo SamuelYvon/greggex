@@ -8,8 +8,9 @@
 //! <escaped-char>: ,,^,$,{,},(,),[,],
 //! <modifier>: *,+,{l,h}
 
-use crate::parse::GregexpToken::Sequence;
+use crate::parse::GregExpToken::{CharacterGroup, Sequence};
 use std::borrow::Cow;
+use std::collections::HashSet;
 /// Input stream that is peekable. Used to facilitated parsing and error reporting.
 use std::iter::{Enumerate, Peekable};
 use std::ops::Range;
@@ -37,10 +38,10 @@ pub enum CountModifier {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum GregexpToken {
-    Sequence(Vec<GregexpToken>),
-    Group(Rc<GregexpToken>, Option<CountModifier>),
-    CharacterGroup(Option<CountModifier>),
+pub enum GregExpToken {
+    Sequence(Vec<GregExpToken>),
+    Group(Rc<GregExpToken>, Option<CountModifier>),
+    CharacterGroup(HashSet<char>, Option<CountModifier>),
     ExactMatch(char, Option<CountModifier>),
 }
 
@@ -103,6 +104,30 @@ fn parse_number(input: &mut TokenStream) -> ParsingResult<usize> {
     }
 
     Ok(number)
+}
+
+/// Checks if the next character is valid for a single character input
+fn next_character_is_valid(input: &mut TokenStream) -> bool {
+    match input.peek() {
+        None => false,
+        Some((_, c)) if *c >= 'a' && *c <= 'z' => true,
+        Some((_, c)) if *c >= 'A' && *c <= 'Z' => true,
+        Some((_, c)) if *c >= '0' && *c <= '9' => true,
+        Some((_, '@')) => true,
+        Some((_, '!')) => true,
+        Some((_, '#')) => true,
+        Some((_, '%')) => true,
+        Some((_, '=')) => true,
+        Some((_, '"')) => true,
+        Some((_, '\'')) => true,
+        Some((_, '&')) => true,
+        Some((_, '-')) => true,
+        Some((_, ',')) => true,
+        Some((_, ':')) => true,
+        Some((_, ';')) => true,
+        Some((_, '\\')) => true,
+        Some((_, _)) => false,
+    }
 }
 
 /// Parses a single character a literal regex input. Will read escaped character
@@ -186,8 +211,35 @@ fn parse_modifier(input: &mut TokenStream) -> ParsingResult<Option<CountModifier
     }
 }
 
+fn parse_char_group(input: &mut TokenStream) -> ParsingResult<HashSet<char>> {
+    let first = parse_single_character(input)?;
+
+    let mut values = HashSet::new();
+
+    match input.peek() {
+        None => (),
+        // It's a 'dynamic' ascii range.
+        Some((_, '-')) => {
+            expect_char!('-', input);
+            let second = parse_single_character(input)?;
+            for c in first..=second {
+                values.insert(c);
+            }
+        }
+        // It's a sequence of characters that are or-d
+        Some((_, _)) => {
+            values.insert(first);
+            while next_character_is_valid(input) {
+                values.insert(parse_single_character(input)?);
+            }
+        }
+    }
+
+    Ok(values)
+}
+
 /// Parse an expression.
-fn parse_expr(input: &mut TokenStream) -> ParsingResult<GregexpToken> {
+fn parse_expr(input: &mut TokenStream) -> ParsingResult<GregExpToken> {
     let mut ret = vec![];
 
     while let Some(peeked) = input.peek() {
@@ -197,18 +249,21 @@ fn parse_expr(input: &mut TokenStream) -> ParsingResult<GregexpToken> {
                 let expr = parse_expr(input)?;
                 expect_char!(GROUP_END, input);
                 let modifier = parse_modifier(input)?;
-                ret.push(GregexpToken::Group(Rc::new(expr), modifier));
+                ret.push(GregExpToken::Group(Rc::new(expr), modifier));
             }
             (_, GROUP_END) => break,
             (_, CHAR_GROUP_START) => {
                 expect_char!(CHAR_GROUP_START, input);
+                let values = parse_char_group(input)?;
                 expect_char!(CHAR_GROUP_END, input);
+                let modifier = parse_modifier(input)?;
+                ret.push(CharacterGroup(values, modifier));
             }
             (_, CHAR_GROUP_END) => break,
             (_, _) => {
                 let char = parse_single_character(input)?;
                 let modifier = parse_modifier(input)?;
-                ret.push(GregexpToken::ExactMatch(char, modifier))
+                ret.push(GregExpToken::ExactMatch(char, modifier))
             }
         }
     }
@@ -221,14 +276,14 @@ fn stream_of(input: &str) -> TokenStream {
     chars.peekable()
 }
 
-pub fn parse(gregexp: &str) -> ParsingResult<GregexpToken> {
+pub fn parse(gregexp: &str) -> ParsingResult<GregExpToken> {
     let token_stream = stream_of(gregexp);
     parse_expr(&mut token_stream.into())
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::parse::{CountModifier, GregexpToken, parse_expr, parse_modifier, stream_of};
+    use crate::parse::{CountModifier, GregExpToken, parse_expr, parse_modifier, stream_of};
 
     #[test]
     fn test_parsing_modifier() {
@@ -242,18 +297,30 @@ mod tests {
         let expr = "a{5,6}b";
         let result = parse_expr(&mut stream_of(expr)).unwrap();
 
-        if let GregexpToken::Sequence(vec) = result {
+        if let GregExpToken::Sequence(vec) = result {
             assert_eq!(2, vec.len());
             let a_s = &vec[0];
             let b_s = &vec[1];
 
             assert!(matches!(
                 a_s,
-                GregexpToken::ExactMatch('a', Some(CountModifier::Range(_)))
+                GregExpToken::ExactMatch('a', Some(CountModifier::Range(_)))
             ));
-            assert!(matches!(b_s, GregexpToken::ExactMatch('b', None)));
+            assert!(matches!(b_s, GregExpToken::ExactMatch('b', None)));
         } else {
             panic!("Expected sequence, got: {:?}", result);
+        }
+    }
+
+    #[test]
+    fn test_parsing_char_group() {
+        let expr = "[a-z]";
+        let result = parse_expr(&mut stream_of(expr)).unwrap();
+
+        if let GregExpToken::Sequence(vec) = result {
+            assert!(matches!(vec[0], GregExpToken::CharacterGroup(_, None)));
+        } else {
+            panic!("Expected Vec<CharGroup>, got: {:?}", result);
         }
     }
 }

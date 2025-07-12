@@ -1,19 +1,21 @@
 //! Postfix transformation of the parsed regex. The postfix transformation allows us to easily
 //! build Thompson NFAs.
 
-use crate::parse::{CountModifier, GregexpToken};
+use crate::parse::{CountModifier, GregExpToken};
+use std::collections::HashSet;
 
 #[derive(Debug)]
-pub enum GregexpSegment {
+pub enum GregExpSegment {
     Character(char),
+    Set(HashSet<char>),
     Concat,
     Star,
     AtLeastOnce,
     AtMostOnce,
 }
 
-fn write_with_mod<F: Fn(&mut Vec<GregexpSegment>)>(
-    buffer: &mut Vec<GregexpSegment>,
+fn write_with_mod<F: Fn(&mut Vec<GregExpSegment>)>(
+    buffer: &mut Vec<GregExpSegment>,
     writer: F,
     modifier: &Option<CountModifier>,
 ) {
@@ -21,56 +23,56 @@ fn write_with_mod<F: Fn(&mut Vec<GregexpSegment>)>(
 
     match modifier {
         None => (),
-        Some(CountModifier::Star) => buffer.push(GregexpSegment::Star),
-        Some(CountModifier::AtLeastOnce) => buffer.push(GregexpSegment::AtLeastOnce),
-        Some(CountModifier::AtMostOnce) => buffer.push(GregexpSegment::AtMostOnce),
+        Some(CountModifier::Star) => buffer.push(GregExpSegment::Star),
+        Some(CountModifier::AtLeastOnce) => buffer.push(GregExpSegment::AtLeastOnce),
+        Some(CountModifier::AtMostOnce) => buffer.push(GregExpSegment::AtMostOnce),
         Some(CountModifier::Exact(repeats)) => {
             for _ in 0..(repeats - 1) {
                 writer(buffer);
-                buffer.push(GregexpSegment::Concat);
+                buffer.push(GregExpSegment::Concat);
             }
         }
         Some(CountModifier::Range(ranged)) => {
             for _ in 0..(ranged.start - 1) {
                 writer(buffer);
-                buffer.push(GregexpSegment::Concat);
+                buffer.push(GregExpSegment::Concat);
             }
 
             let opt = ranged.end - ranged.start;
             for _ in 0..opt {
                 writer(buffer);
-                buffer.push(GregexpSegment::AtMostOnce);
-                buffer.push(GregexpSegment::Concat);
+                buffer.push(GregExpSegment::AtMostOnce);
+                buffer.push(GregExpSegment::Concat);
             }
         }
     }
 }
 
-fn postfix_sequence(parts: &Vec<GregexpToken>, buffer: &mut Vec<GregexpSegment>) {
+fn postfix_sequence(parts: &Vec<GregExpToken>, buffer: &mut Vec<GregExpSegment>) {
     for (i, part) in parts.iter().enumerate() {
         postfix_any(part, buffer);
 
         // Had something before, has something after.
         if i > 0 {
-            buffer.push(GregexpSegment::Concat)
+            buffer.push(GregExpSegment::Concat)
         }
     }
 }
 
-fn postfix_exact(value: char, modifier: &Option<CountModifier>, buffer: &mut Vec<GregexpSegment>) {
+fn postfix_exact(value: char, modifier: &Option<CountModifier>, buffer: &mut Vec<GregExpSegment>) {
     write_with_mod(
         buffer,
         |buffer| {
-            buffer.push(GregexpSegment::Character(value));
+            buffer.push(GregExpSegment::Character(value));
         },
         modifier,
     );
 }
 
 fn postfix_group(
-    expr: &GregexpToken,
+    expr: &GregExpToken,
     modifier: &Option<CountModifier>,
-    buffer: &mut Vec<GregexpSegment>,
+    buffer: &mut Vec<GregExpSegment>,
 ) {
     write_with_mod(
         buffer,
@@ -81,31 +83,62 @@ fn postfix_group(
     );
 }
 
-fn postfix_any(gregexp: &GregexpToken, buffer: &mut Vec<GregexpSegment>) {
+fn postfix_character_group(
+    charset: &HashSet<char>,
+    modifier: &Option<CountModifier>,
+    buffer: &mut Vec<GregExpSegment>,
+) {
+    write_with_mod(
+        buffer,
+        |buffer| {
+            buffer.push(GregExpSegment::Set(charset.clone()));
+        },
+        modifier,
+    );
+}
+
+fn postfix_any(gregexp: &GregExpToken, buffer: &mut Vec<GregExpSegment>) {
     match gregexp {
-        GregexpToken::Sequence(parts) => postfix_sequence(parts, buffer),
-        GregexpToken::Group(expr, modifier) => postfix_group(expr, modifier, buffer),
-        GregexpToken::CharacterGroup(_) => todo!(),
-        GregexpToken::ExactMatch(char, modifer) => postfix_exact(*char, modifer, buffer),
+        GregExpToken::Sequence(parts) => postfix_sequence(parts, buffer),
+        GregExpToken::Group(expr, modifier) => postfix_group(expr, modifier, buffer),
+        GregExpToken::CharacterGroup(charset, modifier) => {
+            postfix_character_group(charset, modifier, buffer)
+        }
+        GregExpToken::ExactMatch(char, modifier) => postfix_exact(*char, modifier, buffer),
     }
 }
 
-pub fn postfix(gregexp: &GregexpToken) -> Vec<GregexpSegment> {
+pub fn postfix(gregexp: &GregExpToken) -> Vec<GregExpSegment> {
     let mut buffer = vec![];
     postfix_any(gregexp, &mut buffer);
     buffer
 }
 
-pub fn postfix_to_string(postfix: &Vec<GregexpSegment>) -> String {
+pub fn postfix_to_string(postfix: &Vec<GregExpSegment>) -> String {
     let mut buffer = String::new();
+    let mut charsets = vec![];
 
     for segment in postfix {
         match segment {
-            GregexpSegment::Character(a) => buffer += &a.to_string(),
-            GregexpSegment::Concat => buffer += ".",
-            GregexpSegment::AtLeastOnce => buffer += "+",
-            GregexpSegment::AtMostOnce => buffer += "?",
-            GregexpSegment::Star => buffer += "*",
+            GregExpSegment::Character(a) => buffer += &a.to_string(),
+            GregExpSegment::Concat => buffer += ".",
+            GregExpSegment::AtLeastOnce => buffer += "+",
+            GregExpSegment::AtMostOnce => buffer += "?",
+            GregExpSegment::Star => buffer += "*",
+            GregExpSegment::Set(charset) => {
+                let mut values = charset.iter().map(|c| c.to_string()).collect::<Vec<_>>();
+                values.sort();
+
+                buffer += &format!("<s{0}>", charsets.len() + 1);
+                charsets.push(values.join(","));
+            }
+        }
+    }
+
+    if charsets.len() > 0 {
+        buffer += "\n";
+        for (i, charset) in charsets.iter().enumerate() {
+            buffer += &format!("s{0} = {charset}\n", i + 1);
         }
     }
 
@@ -161,5 +194,15 @@ mod tests {
     #[test]
     fn test_exact_edge_case() {
         assert_eq!(make_postfix_str("a{1}"), "a")
+    }
+
+    #[test]
+    fn test_char_group_range() {
+        assert_eq!(make_postfix_str("[a-d]"), "<s1>\ns1 = a,b,c,d\n");
+    }
+
+    #[test]
+    fn test_char_group() {
+        assert_eq!(make_postfix_str("[abcdef]"), "<s1>\ns1 = a,b,c,d,e,f\n");
     }
 }

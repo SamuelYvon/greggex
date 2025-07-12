@@ -20,7 +20,7 @@ fn add_node(node: &OnceCell<Weak<Node>>, future: &mut HashSet<usize>) {
     }
 
     match node.as_ref() {
-        Node::LiteralMatch { id, .. } => {
+        Node::LiteralMatch { id, .. } | Node::CharsetMatch { id, .. } => {
             future.insert(*id);
         }
         Node::Choice { outs: out, .. } => {
@@ -59,6 +59,11 @@ pub fn execute(input: &str, gregexp: &Gregexp) -> bool {
                     ..
                 } => {
                     if *matching == current_char {
+                        add_node(&next, &mut future);
+                    }
+                }
+                Node::CharsetMatch { charset, next, .. } => {
+                    if charset.contains(&current_char) {
                         add_node(&next, &mut future);
                     }
                 }
@@ -133,6 +138,12 @@ mod tests {
         assert!(execute("aaahello", &compiled));
     }
 
+    #[test]
+    fn test_char_group_simple() {
+        let compiled = _compile("6541[0-9]{12}");
+        assert!(execute("6541000011112222", &compiled));
+    }
+
     fn make_pathlogical_expr(n: usize) -> String {
         let mut builder = String::new();
 
@@ -175,7 +186,7 @@ mod tests {
         let mut max = 0_u128;
         let mut min = timings[0];
 
-        for (i, v) in timings.into_iter().enumerate() {
+        for v in timings.into_iter() {
             if v > max {
                 max = v;
             }
