@@ -11,9 +11,9 @@ pub struct State {
     id: usize,
     out: OnceCell<Rc<State>>,
     back_out: OnceCell<Weak<State>>,
+    free_out: OnceCell<Rc<State>>,
     out_chars: RefCell<HashSet<char>>,
     back_chars: RefCell<HashSet<char>>,
-    free_out: OnceCell<Rc<State>>,
 }
 
 impl State {
@@ -22,15 +22,116 @@ impl State {
             id,
             out: OnceCell::new(),
             out_chars: RefCell::new(HashSet::new()),
+            free_out: OnceCell::new(),
             back_out: OnceCell::new(),
             back_chars: RefCell::new(HashSet::new()),
-            free_out: OnceCell::new(),
         })
     }
 }
 
 #[derive(Debug, Error, Eq, PartialEq, Clone)]
 pub enum CompilationError {}
+
+fn compile_group(
+    previous: Rc<State>,
+    gregexp: &Rc<Gregexp>,
+    modifier: Option<CountModifier>,
+) -> Rc<State> {
+    match modifier {
+        None => compile_any(previous, gregexp),
+        // {*}
+        Some(CountModifier::Star) => {
+            let group = compile_any(previous.clone(), gregexp);
+            let free_node = State::new(group.id + 1);
+
+            let first_of_group = previous
+                .out
+                .get()
+                .expect("Should have been set, a group has been generated.");
+
+            // The end of the group can link back to the start of the group, based
+            // on the same criteria
+            group
+                .back_out
+                .set(Rc::downgrade(&first_of_group))
+                .expect("Should never have been set");
+            // Add the criteria
+            for entry in previous.out_chars.borrow().iter() {
+                group.back_chars.borrow_mut().insert(*entry);
+            }
+
+            group
+                .free_out
+                .set(free_node.clone())
+                .expect("Should never have been set");
+
+            previous
+                .free_out
+                .set(free_node.clone())
+                .expect("Should never have been set");
+
+            free_node
+        }
+        // +
+        Some(CountModifier::AtLeastOnce) => {
+            let group = compile_any(previous.clone(), gregexp);
+            let free_node = State::new(group.id + 1);
+
+            let first_of_group = previous
+                .out
+                .get()
+                .expect("Should have been set, a group has been generated.");
+
+            // The end of the group can link back to the start of the group, based
+            // on the same criteria
+            group
+                .back_out
+                .set(Rc::downgrade(&first_of_group))
+                .expect("Should never have been set");
+            // Add the criteria
+            for entry in previous.out_chars.borrow().iter() {
+                group.back_chars.borrow_mut().insert(*entry);
+            }
+
+            group
+                .free_out
+                .set(free_node.clone())
+                .expect("Should never have been set");
+
+            free_node
+        }
+        // {?}
+        Some(CountModifier::AtMostOnce) => {
+            let group = compile_any(previous.clone(), gregexp);
+            let free_node = State::new(group.id + 1);
+
+            previous
+                .free_out
+                .set(free_node.clone())
+                .expect("Should never have been set");
+
+            group
+                .free_out
+                .set(free_node.clone())
+                .expect("Should never have been set");
+
+            free_node
+        }
+        // {n}
+        Some(CountModifier::Exact(n)) => {
+            let mut previous = previous;
+
+            for _ in 0..n {
+                previous = compile_any(previous, gregexp);
+            }
+
+            previous
+        }
+        Some(_) => {
+            todo!()
+        }
+    }
+}
 
 fn compile_exact_match(previous: Rc<State>, c: char, modifier: Option<CountModifier>) -> Rc<State> {
     match modifier {
@@ -117,23 +218,38 @@ fn compile_exact_match(previous: Rc<State>, c: char, modifier: Option<CountModif
                 .expect("Should never have been set before!");
 
             exit_node
-        },
+        }
+        // {n}
         Some(CountModifier::Exact(n)) => {
             let mut previous = previous;
 
             for _ in 0..n {
                 let node = State::new(previous.id + 1);
 
-                previous.out.set(node.clone()).expect("Should never have been set before!");
+                previous
+                    .out
+                    .set(node.clone())
+                    .expect("Should never have been set before!");
                 previous.out_chars.borrow_mut().insert(c);
 
                 previous = node
             }
 
             previous
-        },
+        }
         _ => todo!(),
     }
+}
+
+/// Compile a sequence
+fn compile_sequence(previous: Rc<State>, exprs: &Vec<Gregexp>) -> Rc<State> {
+    let mut previous = previous;
+
+    for expr in exprs {
+        previous = compile_any(previous, expr);
+    }
+
+    previous
 }
 
 /// Given the start node, generate the dot representation of the FSM
@@ -210,24 +326,29 @@ fn to_dot(start_node: Rc<State>) -> String {
     result
 }
 
-fn compile_any(previous: Rc<State>, gregexp: Gregexp) -> Rc<State> {
+fn compile_any(previous: Rc<State>, gregexp: &Gregexp) -> Rc<State> {
     match gregexp {
-        Gregexp::Sequence(_) => todo!(),
-        Gregexp::Group(_, _) => todo!(),
-        Gregexp::CharacterGroup => todo!(),
-        Gregexp::ExactMatch(c, modifier) => compile_exact_match(previous, c, modifier),
+        Gregexp::Sequence(exprs) => compile_sequence(previous, exprs),
+        Gregexp::Group(expr, modifier) => compile_group(previous, expr, modifier.clone()),
+        Gregexp::CharacterGroup(_) => todo!(),
+        Gregexp::ExactMatch(c, modifier) => compile_exact_match(previous, *c, modifier.clone()),
     }
 }
 
-pub fn compile(gregexp: Gregexp) {
+pub fn compile(gregexp: &Gregexp) -> (Rc<State>, Rc<State>) {
     let start_node = State::new(START_STATE_ID);
-    let last_node = compile_any(start_node, gregexp);
+    let last_node = compile_any(start_node.clone(), gregexp);
+
+    (start_node, last_node)
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::compile::{START_STATE_ID, State, compile_exact_match, to_dot};
-    use crate::parse::CountModifier;
+    use crate::compile::{
+        START_STATE_ID, State, compile, compile_any, compile_exact_match, to_dot,
+    };
+    use crate::parse::{CountModifier, Gregexp, parse};
+    use std::rc::Rc;
 
     #[test]
     fn simple_a_match() {
@@ -262,5 +383,98 @@ mod tests {
         let start_node = State::new(START_STATE_ID);
         compile_exact_match(start_node.clone(), 'A', Some(CountModifier::Exact(4)));
         println!("{0}", to_dot(start_node));
+    }
+
+    #[test]
+    fn simple_ab_match() {
+        let start_node = State::new(START_STATE_ID);
+
+        compile_any(
+            start_node.clone(),
+            &Gregexp::Sequence(vec![
+                Gregexp::ExactMatch('A', None),
+                Gregexp::ExactMatch('B', None),
+            ]),
+        );
+
+        println!("{0}", to_dot(start_node));
+    }
+
+    #[test]
+    fn test_simple_ab_group_repeat() {
+        let start_node = State::new(START_STATE_ID);
+
+        let sequence = Gregexp::Sequence(vec![
+            Gregexp::ExactMatch('A', None),
+            Gregexp::ExactMatch('B', None),
+        ]);
+
+        compile_any(
+            start_node.clone(),
+            &Gregexp::Group(Rc::new(sequence), Some(CountModifier::Exact(2))),
+        );
+
+        println!("{0}", to_dot(start_node));
+    }
+
+    #[test]
+    fn test_simple_ab_group_opt() {
+        let start_node = State::new(START_STATE_ID);
+
+        let sequence = Gregexp::Sequence(vec![
+            Gregexp::ExactMatch('A', None),
+            Gregexp::ExactMatch('B', None),
+        ]);
+
+        compile_any(
+            start_node.clone(),
+            &Gregexp::Group(Rc::new(sequence), Some(CountModifier::AtMostOnce)),
+        );
+
+        println!("{0}", to_dot(start_node));
+    }
+
+    #[test]
+    fn test_simple_abc_group_star() {
+        let start_node = State::new(START_STATE_ID);
+
+        let sequence = Gregexp::Sequence(vec![
+            Gregexp::ExactMatch('A', None),
+            Gregexp::ExactMatch('B', None),
+            Gregexp::ExactMatch('C', None),
+        ]);
+
+        compile_any(
+            start_node.clone(),
+            &Gregexp::Group(Rc::new(sequence), Some(CountModifier::Star)),
+        );
+
+        println!("{0}", to_dot(start_node));
+    }
+
+    #[test]
+    fn test_simple_abc_group_at_least_once() {
+        let start_node = State::new(START_STATE_ID);
+
+        let sequence = Gregexp::Sequence(vec![
+            Gregexp::ExactMatch('A', None),
+            Gregexp::ExactMatch('B', None),
+            Gregexp::ExactMatch('C', None),
+        ]);
+
+        compile_any(
+            start_node.clone(),
+            &Gregexp::Group(Rc::new(sequence), Some(CountModifier::AtLeastOnce)),
+        );
+
+        println!("{0}", to_dot(start_node));
+    }
+
+    #[test]
+    fn test_repeat_with_prefix() {
+        let expr = parse("prefix:(hello)*").expect("Should parse successfully");
+        let (start, _) = compile(&expr);
+
+        println!("{0}", to_dot(start));
     }
 }

@@ -40,7 +40,7 @@ pub enum CountModifier {
 pub enum Gregexp {
     Sequence(Vec<Gregexp>),
     Group(Rc<Gregexp>, Option<CountModifier>),
-    CharacterGroup,
+    CharacterGroup(Option<CountModifier>),
     ExactMatch(char, Option<CountModifier>),
 }
 
@@ -157,13 +157,23 @@ fn parse_single_character(input : &mut TokenStream) -> ParsingResult<char> {
 /// Parses a count modifier for a token.
 fn parse_modifier(input: &mut TokenStream) -> ParsingResult<Option<CountModifier>> {
     // At least one character
-    let next = input.next();
+    let next = input.peek();
 
     match next {
-        Some((_, CHAR_MODIFIER_STAR)) => Ok(Some(CountModifier::Star)),
-        Some((_, CHAR_MODIFIER_AT_LEAST_ONE)) => Ok(Some(CountModifier::AtLeastOnce)),
-        Some((_, CHAR_MODIFIER_AT_MOST_ONCE)) => Ok(Some(CountModifier::AtMostOnce)),
+        Some((_, CHAR_MODIFIER_STAR)) => {
+            expect_char!(CHAR_MODIFIER_STAR, input);
+            Ok(Some(CountModifier::Star))
+        },
+        Some((_, CHAR_MODIFIER_AT_LEAST_ONE)) => {
+            expect_char!(CHAR_MODIFIER_AT_LEAST_ONE, input);
+            Ok(Some(CountModifier::AtLeastOnce))
+        },
+        Some((_, CHAR_MODIFIER_AT_MOST_ONCE)) => {
+            expect_char!(CHAR_MODIFIER_AT_MOST_ONCE, input);
+            Ok(Some(CountModifier::AtMostOnce))
+        },
         Some((_, CHAR_MODIFIER_RANGE_START)) => {
+            expect_char!(CHAR_MODIFIER_RANGE_START, input);
             let n1 = parse_number(input)?;
 
             let modifier = if matches!(input.peek(), Some((_, ','))) {
@@ -182,34 +192,33 @@ fn parse_modifier(input: &mut TokenStream) -> ParsingResult<Option<CountModifier
     }
 }
 
-// fn parse_char(input : &mut TokenStream) -> ParsingResult<Gregexp> {
-//
-// }
-
 /// Parse an expression.
 fn parse_expr(input: &mut TokenStream) -> ParsingResult<Gregexp> {
     let mut ret = vec![];
 
-    while let Some(next) = input.peek() {
-        match next {
+    while let Some(peeked) = input.peek() {
+        match peeked {
             (_, GROUP_START) => {
                 expect_char!(GROUP_START, input);
-                ret.push(parse_expr(input)?);
+                let expr = parse_expr(input)?;
                 expect_char!(GROUP_END, input);
-            }
+                let modifier = parse_modifier(input)?;
+                ret.push(Gregexp::Group(Rc::new(expr), modifier));
+            },
+            (_, GROUP_END) => break,
             (_, CHAR_GROUP_START) => {
                 expect_char!(CHAR_GROUP_START, input);
-
                 expect_char!(CHAR_GROUP_END, input);
-            }
+            },
+            (_, CHAR_GROUP_END) => break,
             (_, _) => {
-                let char =parse_single_character(input)?;
+                let char = parse_single_character(input)?;
                 let modifier = parse_modifier(input)?;
                 ret.push(Gregexp::ExactMatch(char, modifier))
             }
         }
     }
-    
+
     Ok(Sequence(ret))
 }
 
@@ -218,8 +227,9 @@ fn stream_of(input: &str) -> TokenStream {
     chars.peekable()
 }
 
-pub fn parse(gregexp: &str) {
+pub fn parse(gregexp: &str) -> ParsingResult<Gregexp> {
     let token_stream = stream_of(gregexp);
+    parse_expr(&mut token_stream.into())
 }
 
 #[cfg(test)]
@@ -232,17 +242,17 @@ mod tests {
         let result = parse_modifier(&mut stream_of(range)).unwrap();
         assert_eq!(result, Some(CountModifier::Range(123..456)));
     }
-    
+
     #[test]
     fn test_parsing_repeated_a_b() {
         let expr = "a{5,6}b";
         let result = parse_expr(&mut stream_of(expr)).unwrap();
-        
+
         if let Gregexp::Sequence(vec) = result {
             assert_eq!(2, vec.len());
             let a_s = &vec[0];
             let b_s = &vec[1];
-            
+
             assert!(matches!(a_s, Gregexp::ExactMatch('a', Some(CountModifier::Range(_)))));
             assert!(matches!(b_s, Gregexp::ExactMatch('b', None)));
         } else {
