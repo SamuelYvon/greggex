@@ -1,5 +1,6 @@
 use crate::compile::{CompiledGreggex, State};
 use std::collections::HashSet;
+use std::io::Read;
 use std::rc::Rc;
 
 fn step(
@@ -13,6 +14,10 @@ fn step(
             if state.out_chars.borrow().contains(&c) {
                 future.insert(Rc::clone(out));
             }
+
+            if let Some(out) = out.free_out.get() {
+                future.insert(Rc::clone(&out));
+            }
         }
 
         if let Some(out) = state.back_out.get() {
@@ -21,17 +26,18 @@ fn step(
                     &out.upgrade().expect("The reference should still be valid"),
                 ));
             }
+
+            if let Some(out) = out.upgrade().unwrap().free_out.get() {
+                future.insert(Rc::clone(&out));
+            }
         }
     } else {
         future.insert(Rc::clone(&state));
-    }
-
-    if let Some(out) = state.free_out.get() {
-        if !current.contains(out) {
+        if let Some(out) = state.free_out.get() {
             future.insert(Rc::clone(&out));
-            step(c, Rc::clone(out), current, future);
         }
     }
+
 }
 
 pub fn execute(input: &str, fsm: &CompiledGreggex) -> bool {
@@ -42,7 +48,7 @@ pub fn execute(input: &str, fsm: &CompiledGreggex) -> bool {
 
     let mut future: HashSet<Rc<State>> = HashSet::new();
 
-    for ch in input.chars().map(Some).chain(std::iter::once(None)) {
+    for ch in std::iter::once(None).chain(input.chars().map(Some).chain(std::iter::once(None))) {
         for state in &current {
             step(ch, Rc::clone(state), &current, &mut future);
         }
@@ -52,6 +58,8 @@ pub fn execute(input: &str, fsm: &CompiledGreggex) -> bool {
             current.insert(fut);
         }
     }
+
+    dbg!(&current);
 
     current.contains(end)
 }
@@ -103,7 +111,7 @@ mod tests {
     #[test]
     fn test_hard_regex() {
         const REPEATS: usize = 10;
-        const MAX_LEN: usize = 50;
+        const MAX_LEN: usize = 30;
 
         let mut timings = [0; MAX_LEN];
 
@@ -118,7 +126,7 @@ mod tests {
                 let start = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
                 assert!(execute(&input, &compiled));
                 let end = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
-                timings[n - 1] = (end - start).as_nanos()
+                timings[n - 1] = (end - start).as_micros()
             }
         }
 
@@ -134,7 +142,7 @@ mod tests {
             }
         }
 
-        println!("Min timing: {min}ns");
-        println!("Max timing: {max}ns");
+        println!("Min timing: {min}us");
+        println!("Max timing: {max}us");
     }
 }

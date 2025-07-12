@@ -186,7 +186,7 @@ fn compile_exact_match(previous: Rc<State>, c: char, modifier: Option<CountModif
         // ?
         Some(CountModifier::AtMostOnce) => {
             let node = State::new(previous.id + 1);
-            let free_node = State::new(node.id + 1);
+            // let free_node = State::new(node.id + 1);
 
             previous
                 .out
@@ -194,16 +194,16 @@ fn compile_exact_match(previous: Rc<State>, c: char, modifier: Option<CountModif
                 .expect("Should never have been set before!");
             previous.out_chars.borrow_mut().insert(c);
 
-            node.free_out
-                .set(free_node.clone())
-                .expect("Should never have been set before!");
+            // node.free_out
+            //     .set(free_node.clone())
+            //     .expect("Should never have been set before!");
 
             previous
                 .free_out
-                .set(free_node.clone())
+                .set(node.clone())
                 .expect("Should never have been set before!");
 
-            free_node
+            node
         }
         // *
         Some(CountModifier::Star) => {
@@ -356,7 +356,7 @@ pub fn compile(gregexp: &Gregexp) -> CompiledGreggex {
     let start_node = State::new(START_STATE_ID);
     let last_node = compile_any(start_node.clone(), gregexp);
 
-    // println!("{0}\n", to_dot(start_node.clone()));
+    println!("{0}\n", to_dot(start_node.clone()));
 
     (start_node, last_node)
 }
