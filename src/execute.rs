@@ -2,7 +2,12 @@ use crate::compile::{CompiledGreggex, State};
 use std::collections::HashSet;
 use std::rc::Rc;
 
-fn step(c: Option<char>, state: Rc<State>, future: &mut HashSet<Rc<State>>) {
+fn step(
+    c: Option<char>,
+    state: Rc<State>,
+    current: &HashSet<Rc<State>>,
+    future: &mut HashSet<Rc<State>>,
+) {
     if let Some(c) = c {
         if let Some(out) = state.out.get() {
             if state.out_chars.borrow().contains(&c) {
@@ -22,8 +27,10 @@ fn step(c: Option<char>, state: Rc<State>, future: &mut HashSet<Rc<State>>) {
     }
 
     if let Some(out) = state.free_out.get() {
-        future.insert(Rc::clone(&out));
-        step(c, Rc::clone(out), future);
+        if !current.contains(out) {
+            future.insert(Rc::clone(&out));
+            step(c, Rc::clone(out), current, future);
+        }
     }
 }
 
@@ -37,7 +44,7 @@ pub fn execute(input: &str, fsm: &CompiledGreggex) -> bool {
 
     for ch in input.chars().map(Some).chain(std::iter::once(None)) {
         for state in &current {
-            step(ch, Rc::clone(state), &mut future);
+            step(ch, Rc::clone(state), &current, &mut future);
         }
 
         current.drain();
@@ -96,7 +103,7 @@ mod tests {
     #[test]
     fn test_hard_regex() {
         const REPEATS: usize = 10;
-        const MAX_LEN: usize = 30;
+        const MAX_LEN: usize = 50;
 
         let mut timings = [0; MAX_LEN];
 
