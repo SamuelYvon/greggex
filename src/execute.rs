@@ -89,18 +89,24 @@ mod tests {
     use crate::compile::{Gregexp, compile, compile_to_dot};
     use crate::execute::execute;
     use crate::parse::parse;
-    use crate::postfix::{postfix, postfix_to_string};
+    use crate::postfix::postfix;
+    use std::fs;
+    use std::fs::File;
+    use std::io::Write;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn _compile(expr: &str) -> Gregexp {
         let parsed = parse(expr).unwrap();
         let postfixd = postfix(&parsed);
 
-        println!("Postfix: {0}", postfix_to_string(&postfixd));
-
         let compiled = compile(&postfixd).unwrap();
 
-        println!("{0}", compile_to_dot(&compiled));
+        let compiled_dot = compile_to_dot(&compiled);
+
+        let _ = fs::create_dir(".out");
+
+        let mut file = File::create(".out/output.dot").expect("");
+        file.write(compiled_dot.as_bytes()).expect("");
 
         compiled
     }
@@ -142,6 +148,23 @@ mod tests {
     fn test_char_group_simple() {
         let compiled = _compile("6541[0-9]{12}");
         assert!(execute("6541000011112222", &compiled));
+    }
+
+    #[test]
+    fn test_diners_club() {
+        let compiled = _compile("3(0[0-5]|[68][0-9])[0-9]{11}");
+        assert!(execute("30569309025904", &compiled));
+        assert!(execute("38520000023237", &compiled));
+        assert!(!execute("30620000023237", &compiled));
+        assert!(!execute("39520000023237", &compiled));
+    }
+
+    #[test]
+    fn a_bad_email_regex() {
+        let compiled = _compile(
+            "([a-z]|[A-Z]|[0-9]|[\\._%+-]){1,64}@(([a-z]|[A-Z]|[0-9]){1,63}\\.){1,125}([a-z]|[A-Z]){2,63}",
+        );
+        assert!(execute("anemail@host.com", &compiled));
     }
 
     fn make_pathlogical_expr(n: usize) -> String {

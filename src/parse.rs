@@ -1,11 +1,11 @@
 //! Recursive descent parser for a "gregexp". The syntax is the following:
 //!
 //! <expr> : (<group><modifier>?|<char><modifier>?|<char-group><modifier>?)*
-//! <group> : (<expr>)
+//! <group> : (<expr>(|<expr>)*)
 //! <char> : 0-9, a-z, A-Z, !@#$%&*, \<escaped char>
 //! <char-group> : [ <range-expr> ]
 //! <range-expr> : a-a
-//! <escaped-char>: ,,^,$,{,},(,),[,],
+//! <escaped-char>: ,^,$,{,},(,),[,],
 //! <modifier>: *,+,{l,h}
 
 use crate::parse::GregExpToken::{CharacterGroup, Sequence};
@@ -27,6 +27,7 @@ const CHAR_MODIFIER_AT_LEAST_ONE: char = '+';
 const CHAR_MODIFIER_RANGE_START: char = '{';
 const CHAR_MODIFIER_RANGE_END: char = '}';
 const CHAR_MODIFIER_AT_MOST_ONCE: char = '?';
+const CHAR_OR: char = '|';
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CountModifier {
@@ -40,7 +41,7 @@ pub enum CountModifier {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GregExpToken {
     Sequence(Vec<GregExpToken>),
-    Group(Rc<GregExpToken>, Option<CountModifier>),
+    Group(Vec<GregExpToken>, Option<CountModifier>),
     CharacterGroup(HashSet<char>, Option<CountModifier>),
     ExactMatch(char, Option<CountModifier>),
 }
@@ -106,27 +107,35 @@ fn parse_number(input: &mut TokenStream) -> ParsingResult<usize> {
     Ok(number)
 }
 
+fn is_valid_character(c: char) -> bool {
+    match c {
+        c if c >= 'a' && c <= 'z' => true,
+        c if c >= 'A' && c <= 'Z' => true,
+        c if c >= '0' && c <= '9' => true,
+        '@' => true,
+        '!' => true,
+        '#' => true,
+        '%' => true,
+        '=' => true,
+        '"' => true,
+        '\'' => true,
+        '&' => true,
+        '+' => true,
+        '-' => true,
+        '_' => true,
+        ',' => true,
+        ':' => true,
+        ';' => true,
+        '\\' => true,
+        _ => false,
+    }
+}
+
 /// Checks if the next character is valid for a single character input
 fn next_character_is_valid(input: &mut TokenStream) -> bool {
     match input.peek() {
         None => false,
-        Some((_, c)) if *c >= 'a' && *c <= 'z' => true,
-        Some((_, c)) if *c >= 'A' && *c <= 'Z' => true,
-        Some((_, c)) if *c >= '0' && *c <= '9' => true,
-        Some((_, '@')) => true,
-        Some((_, '!')) => true,
-        Some((_, '#')) => true,
-        Some((_, '%')) => true,
-        Some((_, '=')) => true,
-        Some((_, '"')) => true,
-        Some((_, '\'')) => true,
-        Some((_, '&')) => true,
-        Some((_, '-')) => true,
-        Some((_, ',')) => true,
-        Some((_, ':')) => true,
-        Some((_, ';')) => true,
-        Some((_, '\\')) => true,
-        Some((_, _)) => false,
+        Some((_, c)) => is_valid_character(*c),
     }
 }
 
@@ -134,21 +143,6 @@ fn next_character_is_valid(input: &mut TokenStream) -> bool {
 fn parse_single_character(input: &mut TokenStream) -> ParsingResult<char> {
     match input.next() {
         None => Err(ParsingError::EOS2("a character".into())),
-        Some((_, c)) if c >= 'a' && c <= 'z' => Ok(c),
-        Some((_, c)) if c >= 'A' && c <= 'Z' => Ok(c),
-        Some((_, c)) if c >= '0' && c <= '9' => Ok(c),
-        Some((_, c @ '@')) => Ok(c),
-        Some((_, c @ '!')) => Ok(c),
-        Some((_, c @ '#')) => Ok(c),
-        Some((_, c @ '%')) => Ok(c),
-        Some((_, c @ '=')) => Ok(c),
-        Some((_, c @ '"')) => Ok(c),
-        Some((_, c @ '\'')) => Ok(c),
-        Some((_, c @ '&')) => Ok(c),
-        Some((_, c @ '-')) => Ok(c),
-        Some((_, c @ ',')) => Ok(c),
-        Some((_, c @ ':')) => Ok(c),
-        Some((_, c @ ';')) => Ok(c),
         Some((_, '\\')) => match input.next() {
             None => Err(ParsingError::EOS2("any escapable character".into())),
             Some((_, c @ '(')) => Ok(c),
@@ -159,12 +153,15 @@ fn parse_single_character(input: &mut TokenStream) -> ParsingResult<char> {
             Some((_, c @ '}')) => Ok(c),
             Some((_, c @ '$')) => Ok(c),
             Some((_, c @ '^')) => Ok(c),
+            Some((_, c @ '.')) => Ok(c),
             Some((pos, found)) => Err(ParsingError::UnexpectedCharacter2 {
                 description: "any escapable character".into(),
                 found,
                 pos,
             }),
         },
+        // Parse after the escape to make sure escape sequences are completely eaten
+        Some((_, c)) if is_valid_character(c) => Ok(c),
         Some((pos, found)) => Err(ParsingError::UnexpectedCharacter2 {
             description: "a valid character".into(),
             found,
@@ -245,11 +242,22 @@ fn parse_expr(input: &mut TokenStream) -> ParsingResult<GregExpToken> {
     while let Some(peeked) = input.peek() {
         match peeked {
             (_, GROUP_START) => {
+                let mut exprs = vec![];
                 expect_char!(GROUP_START, input);
-                let expr = parse_expr(input)?;
+
+                loop {
+                    exprs.push(parse_expr(input)?);
+
+                    if let Some((_, CHAR_OR)) = input.peek() {
+                        expect_char!(CHAR_OR, input);
+                    } else {
+                        break;
+                    }
+                }
+
                 expect_char!(GROUP_END, input);
                 let modifier = parse_modifier(input)?;
-                ret.push(GregExpToken::Group(Rc::new(expr), modifier));
+                ret.push(GregExpToken::Group(exprs, modifier));
             }
             (_, GROUP_END) => break,
             (_, CHAR_GROUP_START) => {
@@ -260,6 +268,7 @@ fn parse_expr(input: &mut TokenStream) -> ParsingResult<GregExpToken> {
                 ret.push(CharacterGroup(values, modifier));
             }
             (_, CHAR_GROUP_END) => break,
+            (_, CHAR_OR) => break,
             (_, _) => {
                 let char = parse_single_character(input)?;
                 let modifier = parse_modifier(input)?;

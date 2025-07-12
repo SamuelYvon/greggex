@@ -177,6 +177,39 @@ fn compile_concat(node_table: &NodeTable, stack: &mut Vec<Fragment>) -> Compilat
     Ok(())
 }
 
+/// Creates an "or" relation between two fragments
+fn compile_or(
+    node_table: &mut NodeTable,
+    stack: &mut Vec<Fragment>,
+    next_id: &mut usize,
+) -> CompilationResult<()> {
+    // [ e1, e2 ] (stack)
+    let e2 = stack.pop().ok_or(CompilationError::MissingFragment)?;
+    let e1 = stack.pop().ok_or(CompilationError::MissingFragment)?;
+
+    //     /--- e1 --- (out1)
+    // -> <c
+    //     \--- e2 --- (out2)
+
+    let node = Rc::new(Node::Choice {
+        id: *next_id,
+        outs: [
+            OnceCell::from(Rc::downgrade(&e1.node)),
+            OnceCell::from(Rc::downgrade(&e2.node)),
+        ],
+    });
+    node_table.insert(*next_id, node.clone());
+
+    let mut outputs = Vec::with_capacity(e1.outputs.len() + e2.outputs.len());
+    outputs.extend(e1.outputs);
+    outputs.extend(e2.outputs);
+
+    stack.push(Fragment { node, outputs });
+
+    *next_id += 1;
+    Ok(())
+}
+
 fn compile_at_least_once(
     node_table: &mut NodeTable,
     stack: &mut Vec<Fragment>,
@@ -291,6 +324,7 @@ pub fn compile(postfix: &Vec<GregExpSegment>) -> CompilationResult<Gregexp> {
                 compile_character(*c, &mut node_table, &mut stack, &mut next_id)
             }
             GregExpSegment::Concat => compile_concat(&node_table, &mut stack)?,
+            GregExpSegment::Or => compile_or(&mut node_table, &mut stack, &mut next_id)?,
             GregExpSegment::AtMostOnce => {
                 compile_at_most_once(&mut node_table, &mut stack, &mut next_id)?
             }
@@ -325,11 +359,12 @@ pub fn compile_to_dot(exp: &Gregexp) -> String {
     for node in nodes.values() {
         match node.as_ref() {
             Node::LiteralMatch { id, next, value } => {
-                let next = next
-                    .get()
-                    .map(Weak::upgrade)
-                    .flatten()
-                    .expect("Expected a next link");
+                let next = next.get().map(Weak::upgrade).flatten();
+
+                if next.is_none() {
+                    panic!("Expected a next link ({id}, {value})");
+                }
+                let next = next.expect("Expected a next link");
                 builder += &format!("\ta{id} -> a{0}[label=\"{value}\"]\n", next.id());
             }
             Node::CharsetMatch { id, next, charset } => {

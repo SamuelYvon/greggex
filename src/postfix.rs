@@ -8,6 +8,7 @@ use std::collections::HashSet;
 pub enum GregExpSegment {
     Character(char),
     Set(HashSet<char>),
+    Or,
     Concat,
     Star,
     AtLeastOnce,
@@ -70,14 +71,20 @@ fn postfix_exact(value: char, modifier: &Option<CountModifier>, buffer: &mut Vec
 }
 
 fn postfix_group(
-    expr: &GregExpToken,
+    exprs: &Vec<GregExpToken>,
     modifier: &Option<CountModifier>,
     buffer: &mut Vec<GregExpSegment>,
 ) {
     write_with_mod(
         buffer,
         |buffer| {
-            postfix_any(expr, buffer);
+            for (i, expr) in exprs.iter().enumerate() {
+                postfix_any(expr, buffer);
+
+                if i > 0 {
+                    buffer.push(GregExpSegment::Or);
+                }
+            }
         },
         modifier,
     );
@@ -100,7 +107,7 @@ fn postfix_character_group(
 fn postfix_any(gregexp: &GregExpToken, buffer: &mut Vec<GregExpSegment>) {
     match gregexp {
         GregExpToken::Sequence(parts) => postfix_sequence(parts, buffer),
-        GregExpToken::Group(expr, modifier) => postfix_group(expr, modifier, buffer),
+        GregExpToken::Group(exprs, modifier) => postfix_group(exprs, modifier, buffer),
         GregExpToken::CharacterGroup(charset, modifier) => {
             postfix_character_group(charset, modifier, buffer)
         }
@@ -122,6 +129,7 @@ pub fn postfix_to_string(postfix: &Vec<GregExpSegment>) -> String {
         match segment {
             GregExpSegment::Character(a) => buffer += &a.to_string(),
             GregExpSegment::Concat => buffer += ".",
+            GregExpSegment::Or => buffer += "|",
             GregExpSegment::AtLeastOnce => buffer += "+",
             GregExpSegment::AtMostOnce => buffer += "?",
             GregExpSegment::Star => buffer += "*",
@@ -204,5 +212,15 @@ mod tests {
     #[test]
     fn test_char_group() {
         assert_eq!(make_postfix_str("[abcdef]"), "<s1>\ns1 = a,b,c,d,e,f\n");
+    }
+
+    #[test]
+    fn test_choice() {
+        assert_eq!(make_postfix_str("(abc|def)"), "ab.c.de.f.|")
+    }
+
+    #[test]
+    fn test_choices() {
+        assert_eq!(make_postfix_str("(a|b|c|d|e)"), "ab|c|d|e|")
     }
 }
