@@ -1,100 +1,139 @@
-use crate::compile::{CompiledGreggex, State};
+use crate::compile::{Gregexp, Node};
+use std::cell::OnceCell;
 use std::collections::HashSet;
-use std::io::Read;
-use std::rc::Rc;
+use std::rc::{Rc, Weak};
+use thiserror::Error;
 
-fn step(
-    c: Option<char>,
-    state: Rc<State>,
-    current: &HashSet<Rc<State>>,
-    future: &mut HashSet<Rc<State>>,
-) {
-    if let Some(c) = c {
-        if let Some(out) = state.out.get() {
-            if state.out_chars.borrow().contains(&c) {
-                future.insert(Rc::clone(out));
-            }
+#[derive(Debug, Error)]
+pub enum ExecutionError {}
 
-            if let Some(out) = out.free_out.get() {
-                future.insert(Rc::clone(&out));
-            }
-        }
+fn add_node(node: &OnceCell<Weak<Node>>, future: &mut HashSet<usize>) {
+    let node = match node.get().map(Weak::upgrade).flatten() {
+        Some(node) => node,
+        None => return,
+    };
 
-        if let Some(out) = state.back_out.get() {
-            if state.back_chars.borrow().contains(&c) {
-                future.insert(Rc::clone(
-                    &out.upgrade().expect("The reference should still be valid"),
-                ));
-            }
+    let node_id = node.id();
 
-            if let Some(out) = out.upgrade().unwrap().free_out.get() {
-                future.insert(Rc::clone(&out));
-            }
-        }
-    } else {
-        future.insert(Rc::clone(&state));
-        if let Some(out) = state.free_out.get() {
-            future.insert(Rc::clone(&out));
-        }
+    if future.contains(&node_id) {
+        return;
     }
 
+    match node.as_ref() {
+        Node::LiteralMatch { id, .. } => {
+            future.insert(*id);
+        }
+        Node::Choice { outs: out, .. } => {
+            add_node(&out[0], future);
+            add_node(&out[1], future);
+        }
+        Node::Matching { id } => {
+            future.insert(*id);
+        }
+    }
 }
 
-pub fn execute(input: &str, fsm: &CompiledGreggex) -> bool {
-    let (start, end) = fsm;
+pub fn execute(input: &str, gregexp: &Gregexp) -> bool {
+    let mut current: HashSet<usize> = HashSet::new();
+    let mut future: HashSet<usize> = HashSet::new();
 
-    let mut current: HashSet<Rc<State>> = HashSet::new();
-    current.insert(start.clone());
+    let first_node = gregexp
+        .node_table
+        .get(&gregexp.start_node_id)
+        .map(Rc::downgrade)
+        .map(OnceCell::from)
+        .expect("The initial node should exist");
 
-    let mut future: HashSet<Rc<State>> = HashSet::new();
+    // Every node that is reachable by the first node should be considered.
+    add_node(&first_node, &mut current);
 
-    for ch in std::iter::once(None).chain(input.chars().map(Some).chain(std::iter::once(None))) {
-        for state in &current {
-            step(ch, Rc::clone(state), &current, &mut future);
+    // Also consider the start node itself
+    current.insert(gregexp.start_node_id);
+
+    for current_char in input.chars() {
+        for current in current.iter().filter_map(|id| gregexp.node_table.get(id)) {
+            match current.as_ref() {
+                Node::LiteralMatch {
+                    value: matching,
+                    next,
+                    ..
+                } => {
+                    if *matching == current_char {
+                        add_node(&next, &mut future);
+                    }
+                }
+                Node::Choice { .. } => continue,
+                Node::Matching { .. } => continue,
+            }
         }
 
-        current.drain();
-        for fut in future.drain() {
-            current.insert(fut);
+        current.clear();
+        for node in future.drain() {
+            current.insert(node);
         }
     }
 
-    dbg!(&current);
-
-    current.contains(end)
+    current
+        .iter()
+        .filter_map(|id| gregexp.node_table.get(id))
+        .any(|node| matches!(node.as_ref(), Node::Matching { .. }))
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::compile::compile;
+    use crate::compile::{Gregexp, compile, compile_to_dot};
     use crate::execute::execute;
     use crate::parse::parse;
+    use crate::postfix::{postfix, postfix_to_string};
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    #[test]
-    fn test_simple_string() {
-        let parsed = parse("hello-world!").unwrap();
-        let compiled = compile(&parsed);
-        assert!(execute("hello-world!", &compiled));
-        assert!(!execute("hello-there!", &compiled));
+    fn _compile(expr: &str) -> Gregexp {
+        let parsed = parse(expr).unwrap();
+        let postfixd = postfix(&parsed);
+
+        println!("Postfix: {0}", postfix_to_string(&postfixd));
+
+        let compiled = compile(&postfixd).unwrap();
+
+        println!("{0}", compile_to_dot(&compiled));
+
+        compiled
     }
 
     #[test]
-    fn test_repeat_group() {
-        let parsed = parse("prefix:(hello)*").unwrap();
-        let compiled = compile(&parsed);
-
-        assert!(execute("prefix:hello", &compiled));
-        assert!(execute("prefix:hellohello", &compiled));
-        assert!(execute("prefix:", &compiled));
-        assert!(!execute("prefix:nothello", &compiled));
+    fn test_simple_regex() {
+        let compiled = _compile("abc");
+        assert!(execute("abc", &compiled));
     }
 
-    fn build_hard_input(n: usize) -> String {
-        (0..n).map(|_| "a").collect::<Vec<_>>().join("")
+    #[test]
+    fn test_at_most_once_regex() {
+        let compiled = _compile("a?bc");
+        assert!(execute("abc", &compiled));
+        assert!(execute("bc", &compiled));
     }
 
-    fn build_hard_regex(n: usize) -> String {
+    #[test]
+    fn test_at_least_once() {
+        let compiled = _compile("a+hello");
+
+        assert!(!execute("hello", &compiled));
+        assert!(execute("ahello", &compiled));
+        assert!(execute("aahello", &compiled));
+        assert!(execute("aaahello", &compiled));
+    }
+
+    #[test]
+    fn test_star() {
+        let compiled = _compile("a*hello");
+
+        assert!(execute("hello", &compiled));
+        assert!(execute("ahello", &compiled));
+        assert!(execute("aahello", &compiled));
+        assert!(execute("aaahello", &compiled));
+    }
+
+    fn make_pathlogical_expr(n: usize) -> String {
         let mut builder = String::new();
 
         for _ in 0..n {
@@ -108,18 +147,21 @@ mod tests {
         builder
     }
 
+    fn make_pathological_ipt(n: usize) -> String {
+        (0..n).map(|_| "a").collect::<Vec<_>>().join("")
+    }
+
     #[test]
     fn test_hard_regex() {
         const REPEATS: usize = 10;
-        const MAX_LEN: usize = 30;
+        const MAX_LEN: usize = 100;
 
         let mut timings = [0; MAX_LEN];
 
         for n in 1..=MAX_LEN {
-            let regex = build_hard_regex(n);
-            let input = build_hard_input(n);
-            let parsed = parse(&regex).expect("Should be a valid regex");
-            let compiled = compile(&parsed);
+            let regex = make_pathlogical_expr(n);
+            let input = make_pathological_ipt(n);
+            let compiled = _compile(&regex);
 
             // Run 10 times to average out
             for _ in 0..REPEATS {

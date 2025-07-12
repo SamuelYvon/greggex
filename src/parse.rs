@@ -8,7 +8,7 @@
 //! <escaped-char>: ,,^,$,{,},(,),[,],
 //! <modifier>: *,+,{l,h}
 
-use crate::parse::Gregexp::Sequence;
+use crate::parse::GregexpToken::Sequence;
 use std::borrow::Cow;
 /// Input stream that is peekable. Used to facilitated parsing and error reporting.
 use std::iter::{Enumerate, Peekable};
@@ -37,9 +37,9 @@ pub enum CountModifier {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Gregexp {
-    Sequence(Vec<Gregexp>),
-    Group(Rc<Gregexp>, Option<CountModifier>),
+pub enum GregexpToken {
+    Sequence(Vec<GregexpToken>),
+    Group(Rc<GregexpToken>, Option<CountModifier>),
     CharacterGroup(Option<CountModifier>),
     ExactMatch(char, Option<CountModifier>),
 }
@@ -187,7 +187,7 @@ fn parse_modifier(input: &mut TokenStream) -> ParsingResult<Option<CountModifier
 }
 
 /// Parse an expression.
-fn parse_expr(input: &mut TokenStream) -> ParsingResult<Gregexp> {
+fn parse_expr(input: &mut TokenStream) -> ParsingResult<GregexpToken> {
     let mut ret = vec![];
 
     while let Some(peeked) = input.peek() {
@@ -197,7 +197,7 @@ fn parse_expr(input: &mut TokenStream) -> ParsingResult<Gregexp> {
                 let expr = parse_expr(input)?;
                 expect_char!(GROUP_END, input);
                 let modifier = parse_modifier(input)?;
-                ret.push(Gregexp::Group(Rc::new(expr), modifier));
+                ret.push(GregexpToken::Group(Rc::new(expr), modifier));
             }
             (_, GROUP_END) => break,
             (_, CHAR_GROUP_START) => {
@@ -208,7 +208,7 @@ fn parse_expr(input: &mut TokenStream) -> ParsingResult<Gregexp> {
             (_, _) => {
                 let char = parse_single_character(input)?;
                 let modifier = parse_modifier(input)?;
-                ret.push(Gregexp::ExactMatch(char, modifier))
+                ret.push(GregexpToken::ExactMatch(char, modifier))
             }
         }
     }
@@ -221,14 +221,14 @@ fn stream_of(input: &str) -> TokenStream {
     chars.peekable()
 }
 
-pub fn parse(gregexp: &str) -> ParsingResult<Gregexp> {
+pub fn parse(gregexp: &str) -> ParsingResult<GregexpToken> {
     let token_stream = stream_of(gregexp);
     parse_expr(&mut token_stream.into())
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::parse::{CountModifier, Gregexp, parse_expr, parse_modifier, stream_of};
+    use crate::parse::{CountModifier, GregexpToken, parse_expr, parse_modifier, stream_of};
 
     #[test]
     fn test_parsing_modifier() {
@@ -242,16 +242,16 @@ mod tests {
         let expr = "a{5,6}b";
         let result = parse_expr(&mut stream_of(expr)).unwrap();
 
-        if let Gregexp::Sequence(vec) = result {
+        if let GregexpToken::Sequence(vec) = result {
             assert_eq!(2, vec.len());
             let a_s = &vec[0];
             let b_s = &vec[1];
 
             assert!(matches!(
                 a_s,
-                Gregexp::ExactMatch('a', Some(CountModifier::Range(_)))
+                GregexpToken::ExactMatch('a', Some(CountModifier::Range(_)))
             ));
-            assert!(matches!(b_s, Gregexp::ExactMatch('b', None)));
+            assert!(matches!(b_s, GregexpToken::ExactMatch('b', None)));
         } else {
             panic!("Expected sequence, got: {:?}", result);
         }
