@@ -8,6 +8,7 @@
 //! <escaped-char>: ,,^,$,{,},(,),[,],
 //! <modifier>: *,+,{l,h}
 
+use crate::parse::Gregexp::Sequence;
 use std::borrow::Cow;
 /// Input stream that is peekable. Used to facilitated parsing and error reporting.
 use std::iter::{Enumerate, Peekable};
@@ -15,7 +16,6 @@ use std::ops::Range;
 use std::rc::Rc;
 use std::str::Chars;
 use thiserror::Error;
-use crate::parse::Gregexp::Sequence;
 
 const GROUP_START: char = '(';
 const GROUP_END: char = ')';
@@ -106,7 +106,7 @@ fn parse_number(input: &mut TokenStream) -> ParsingResult<usize> {
 }
 
 /// Parses a single character a literal regex input. Will read escaped character
-fn parse_single_character(input : &mut TokenStream) -> ParsingResult<char> {
+fn parse_single_character(input: &mut TokenStream) -> ParsingResult<char> {
     match input.next() {
         None => Err(ParsingError::EOS2("a character".into())),
         Some((_, c)) if c >= 'a' && c <= 'z' => Ok(c),
@@ -124,33 +124,27 @@ fn parse_single_character(input : &mut TokenStream) -> ParsingResult<char> {
         Some((_, c @ ',')) => Ok(c),
         Some((_, c @ ':')) => Ok(c),
         Some((_, c @ ';')) => Ok(c),
-        Some((_, '\\')) => {
-            match input.next() {
-                None => Err(ParsingError::EOS2("any escapable character".into())),
-                Some((_, c @ '(')) => Ok(c),
-                Some((_, c @ ')')) => Ok(c),
-                Some((_, c @ '[')) => Ok(c),
-                Some((_, c @ ']')) => Ok(c),
-                Some((_, c @ '{')) => Ok(c),
-                Some((_, c @ '}')) => Ok(c),
-                Some((_, c @ '$')) => Ok(c),
-                Some((_, c @ '^')) => Ok(c),
-                Some((pos, found)) => {
-                    Err(ParsingError::UnexpectedCharacter2 {
-                        description: "any escapable character".into(),
-                        found,
-                        pos
-                    })
-                }
-            }
-        },
-        Some((pos, found)) => {
-            Err(ParsingError::UnexpectedCharacter2 {
-                description: "a valid character".into(),
+        Some((_, '\\')) => match input.next() {
+            None => Err(ParsingError::EOS2("any escapable character".into())),
+            Some((_, c @ '(')) => Ok(c),
+            Some((_, c @ ')')) => Ok(c),
+            Some((_, c @ '[')) => Ok(c),
+            Some((_, c @ ']')) => Ok(c),
+            Some((_, c @ '{')) => Ok(c),
+            Some((_, c @ '}')) => Ok(c),
+            Some((_, c @ '$')) => Ok(c),
+            Some((_, c @ '^')) => Ok(c),
+            Some((pos, found)) => Err(ParsingError::UnexpectedCharacter2 {
+                description: "any escapable character".into(),
                 found,
-                pos
-            })
-        }
+                pos,
+            }),
+        },
+        Some((pos, found)) => Err(ParsingError::UnexpectedCharacter2 {
+            description: "a valid character".into(),
+            found,
+            pos,
+        }),
     }
 }
 
@@ -163,15 +157,15 @@ fn parse_modifier(input: &mut TokenStream) -> ParsingResult<Option<CountModifier
         Some((_, CHAR_MODIFIER_STAR)) => {
             expect_char!(CHAR_MODIFIER_STAR, input);
             Ok(Some(CountModifier::Star))
-        },
+        }
         Some((_, CHAR_MODIFIER_AT_LEAST_ONE)) => {
             expect_char!(CHAR_MODIFIER_AT_LEAST_ONE, input);
             Ok(Some(CountModifier::AtLeastOnce))
-        },
+        }
         Some((_, CHAR_MODIFIER_AT_MOST_ONCE)) => {
             expect_char!(CHAR_MODIFIER_AT_MOST_ONCE, input);
             Ok(Some(CountModifier::AtMostOnce))
-        },
+        }
         Some((_, CHAR_MODIFIER_RANGE_START)) => {
             expect_char!(CHAR_MODIFIER_RANGE_START, input);
             let n1 = parse_number(input)?;
@@ -188,7 +182,7 @@ fn parse_modifier(input: &mut TokenStream) -> ParsingResult<Option<CountModifier
 
             Ok(Some(modifier))
         }
-        _ => Ok(None)
+        _ => Ok(None),
     }
 }
 
@@ -204,12 +198,12 @@ fn parse_expr(input: &mut TokenStream) -> ParsingResult<Gregexp> {
                 expect_char!(GROUP_END, input);
                 let modifier = parse_modifier(input)?;
                 ret.push(Gregexp::Group(Rc::new(expr), modifier));
-            },
+            }
             (_, GROUP_END) => break,
             (_, CHAR_GROUP_START) => {
                 expect_char!(CHAR_GROUP_START, input);
                 expect_char!(CHAR_GROUP_END, input);
-            },
+            }
             (_, CHAR_GROUP_END) => break,
             (_, _) => {
                 let char = parse_single_character(input)?;
@@ -234,7 +228,7 @@ pub fn parse(gregexp: &str) -> ParsingResult<Gregexp> {
 
 #[cfg(test)]
 mod tests {
-    use crate::parse::{CountModifier, parse_modifier, stream_of, parse_expr, Gregexp};
+    use crate::parse::{CountModifier, Gregexp, parse_expr, parse_modifier, stream_of};
 
     #[test]
     fn test_parsing_modifier() {
@@ -253,7 +247,10 @@ mod tests {
             let a_s = &vec[0];
             let b_s = &vec[1];
 
-            assert!(matches!(a_s, Gregexp::ExactMatch('a', Some(CountModifier::Range(_)))));
+            assert!(matches!(
+                a_s,
+                Gregexp::ExactMatch('a', Some(CountModifier::Range(_)))
+            ));
             assert!(matches!(b_s, Gregexp::ExactMatch('b', None)));
         } else {
             panic!("Expected sequence, got: {:?}", result);

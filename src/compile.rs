@@ -1,6 +1,7 @@
 use crate::parse::{CountModifier, Gregexp};
 use std::cell::{OnceCell, RefCell};
 use std::collections::HashSet;
+use std::hash::{Hash, Hasher};
 use std::rc::{Rc, Weak};
 use thiserror::Error;
 
@@ -8,13 +9,29 @@ const START_STATE_ID: usize = 0;
 
 #[derive(Debug)]
 pub struct State {
-    id: usize,
-    out: OnceCell<Rc<State>>,
-    back_out: OnceCell<Weak<State>>,
-    free_out: OnceCell<Rc<State>>,
-    out_chars: RefCell<HashSet<char>>,
-    back_chars: RefCell<HashSet<char>>,
+    pub id: usize,
+    pub out: OnceCell<Rc<State>>,
+    pub back_out: OnceCell<Weak<State>>,
+    pub free_out: OnceCell<Rc<State>>,
+    pub out_chars: RefCell<HashSet<char>>,
+    pub back_chars: RefCell<HashSet<char>>,
 }
+
+impl Eq for State {}
+
+impl PartialEq for State {
+    fn eq(&self, other: &Self) -> bool {
+        self.id == other.id
+    }
+}
+
+impl Hash for State {
+    fn hash<H: Hasher>(&self, hasher: &mut H) {
+        self.id.hash(hasher);
+    }
+}
+
+pub type CompiledGreggex = (Rc<State>, Rc<State>);
 
 impl State {
     fn new(id: usize) -> Rc<Self> {
@@ -335,9 +352,11 @@ fn compile_any(previous: Rc<State>, gregexp: &Gregexp) -> Rc<State> {
     }
 }
 
-pub fn compile(gregexp: &Gregexp) -> (Rc<State>, Rc<State>) {
+pub fn compile(gregexp: &Gregexp) -> CompiledGreggex {
     let start_node = State::new(START_STATE_ID);
     let last_node = compile_any(start_node.clone(), gregexp);
+
+    // println!("{0}\n", to_dot(start_node.clone()));
 
     (start_node, last_node)
 }
