@@ -13,6 +13,7 @@ pub struct State {
     back_out: OnceCell<Weak<State>>,
     out_chars: RefCell<HashSet<char>>,
     back_chars: RefCell<HashSet<char>>,
+    free_out: OnceCell<Rc<State>>,
 }
 
 impl State {
@@ -23,6 +24,7 @@ impl State {
             out_chars: RefCell::new(HashSet::new()),
             back_out: OnceCell::new(),
             back_chars: RefCell::new(HashSet::new()),
+            free_out: OnceCell::new(),
         })
     }
 }
@@ -45,6 +47,7 @@ fn compile_exact_match(previous: Rc<State>, c: char, modifier: Option<CountModif
 
             node
         }
+        // +
         Some(CountModifier::AtLeastOnce) => {
             let node = State::new(previous.id + 1);
 
@@ -61,10 +64,75 @@ fn compile_exact_match(previous: Rc<State>, c: char, modifier: Option<CountModif
             node.back_chars.borrow_mut().insert(c);
 
             node
-        },
-        Some(_) => {
-            todo!()
         }
+        // ?
+        Some(CountModifier::AtMostOnce) => {
+            let node = State::new(previous.id + 1);
+            let free_node = State::new(node.id + 1);
+
+            previous
+                .out
+                .set(node.clone())
+                .expect("Should never have been set before!");
+            previous.out_chars.borrow_mut().insert(c);
+
+            node.free_out
+                .set(free_node.clone())
+                .expect("Should never have been set before!");
+
+            previous
+                .free_out
+                .set(free_node.clone())
+                .expect("Should never have been set before!");
+
+            free_node
+        }
+        // *
+        Some(CountModifier::Star) => {
+            let node = State::new(previous.id + 1);
+            let exit_node = State::new(node.id + 1);
+
+            // Can repeat into itself
+            node.back_out
+                .set(Rc::downgrade(&node))
+                .expect("Should never have been set before!");
+            node.back_chars.borrow_mut().insert(c);
+
+            // Can "escape" through the free node
+            node.free_out
+                .set(exit_node.clone())
+                .expect("Should never have been set before!");
+
+            // Can go to the new node through the planned path
+            previous
+                .out
+                .set(node.clone())
+                .expect("Should never have been set before!");
+            previous.out_chars.borrow_mut().insert(c);
+
+            // Can escape through the exit node
+            previous
+                .free_out
+                .set(exit_node.clone())
+                .expect("Should never have been set before!");
+
+            exit_node
+        },
+        Some(CountModifier::Exact(n)) => {
+            let mut previous = previous;
+
+            for _ in 0..n {
+                let node = State::new(previous.id + 1);
+
+                previous.out.set(node.clone()).expect("Should never have been set before!");
+                previous.out_chars.borrow_mut().insert(c);
+
+                previous = node
+            }
+
+            previous
+        },
+        _ => todo!(),
     }
 }
 
@@ -73,17 +141,25 @@ fn to_dot(start_node: Rc<State>) -> String {
     let mut result = String::new();
     result += "digraph fsm {\n";
 
-    let mut scout = Some(start_node.clone());
+    let mut dfs = vec![start_node.clone()];
 
-    while let Some(node) = scout.clone() {
+    while let Some(node) = dfs.pop() {
         let id = node.id;
         result += &format!("\ta{id} [label=\"{id}\"]\n");
-        scout = node.out.get().cloned();
+
+        if let Some(state) = node.out.get().cloned() {
+            dfs.push(state);
+        }
+
+        if let Some(state) = node.free_out.get().cloned() {
+            dfs.push(state);
+        }
     }
 
-    scout = Some(start_node);
+    dfs.clear();
+    dfs = vec![start_node.clone()];
 
-    while let Some(node) = scout.clone() {
+    while let Some(node) = dfs.pop() {
         let id0 = node.id;
 
         if let Some(other) = node.out.get() {
@@ -115,7 +191,18 @@ fn to_dot(start_node: Rc<State>) -> String {
             result += &format!("\ta{id0} -> a{id1} [label=\"{chars}\"]\n");
         }
 
-        scout = node.out.get().cloned();
+        if let Some(other) = node.free_out.get() {
+            let id1 = other.id;
+            result += &format!("\ta{id0} -> a{id1}\n");
+        }
+
+        if let Some(state) = node.out.get().cloned() {
+            dfs.push(state);
+        }
+
+        if let Some(state) = node.free_out.get().cloned() {
+            dfs.push(state);
+        }
     }
 
     result += "};";
@@ -153,6 +240,27 @@ mod tests {
     fn simple_a_plus_match() {
         let start_node = State::new(START_STATE_ID);
         compile_exact_match(start_node.clone(), 'A', Some(CountModifier::AtLeastOnce));
+        println!("{0}", to_dot(start_node));
+    }
+
+    #[test]
+    fn simple_a_quest_match() {
+        let start_node = State::new(START_STATE_ID);
+        compile_exact_match(start_node.clone(), 'A', Some(CountModifier::AtMostOnce));
+        println!("{0}", to_dot(start_node));
+    }
+
+    #[test]
+    fn simple_a_star_match() {
+        let start_node = State::new(START_STATE_ID);
+        compile_exact_match(start_node.clone(), 'A', Some(CountModifier::Star));
+        println!("{0}", to_dot(start_node));
+    }
+
+    #[test]
+    fn simple_a_4_match() {
+        let start_node = State::new(START_STATE_ID);
+        compile_exact_match(start_node.clone(), 'A', Some(CountModifier::Exact(4)));
         println!("{0}", to_dot(start_node));
     }
 }
