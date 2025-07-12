@@ -1,4 +1,3 @@
-use crate::parse::CountModifier;
 use crate::postfix::GregexpSegment;
 use std::cell::OnceCell;
 use std::collections::HashMap;
@@ -262,17 +261,13 @@ pub fn compile(postfix: &Vec<GregexpSegment>) -> CompilationResult<Gregexp> {
                 compile_character(*c, &mut node_table, &mut stack, &mut next_id)
             }
             GregexpSegment::Concat => compile_concat(&node_table, &mut stack)?,
-            GregexpSegment::CountModifier(modifier) => match modifier {
-                CountModifier::Star => compile_star(&mut node_table, &mut stack, &mut next_id)?,
-                CountModifier::AtLeastOnce => {
-                    compile_at_least_once(&mut node_table, &mut stack, &mut next_id)?
-                }
-                CountModifier::AtMostOnce => {
-                    compile_at_most_once(&mut node_table, &mut stack, &mut next_id)?
-                }
-                CountModifier::Exact(_) => todo!(),
-                CountModifier::Range(_) => todo!(),
-            },
+            GregexpSegment::AtMostOnce => {
+                compile_at_most_once(&mut node_table, &mut stack, &mut next_id)?
+            }
+            GregexpSegment::AtLeastOnce => {
+                compile_at_least_once(&mut node_table, &mut stack, &mut next_id)?
+            }
+            GregexpSegment::Star => compile_star(&mut node_table, &mut stack, &mut next_id)?,
         }
     }
 
@@ -288,7 +283,7 @@ pub fn compile_to_dot(exp: &Gregexp) -> String {
     let mut builder = String::new();
     let nodes = &exp.node_table;
 
-    builder += "digraph G {\n";
+    builder += "digraph Gregx {\n";
 
     for id in nodes.keys() {
         builder += &format!("\ta{id} [label=\"{id}\"]\n");

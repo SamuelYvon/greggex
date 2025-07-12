@@ -1,7 +1,7 @@
-use crate::compile::{compile, compile_to_dot};
+use crate::compile::compile;
 use crate::execute::execute;
 use crate::parse::parse;
-use crate::postfix::{postfix, postfix_to_string};
+use crate::postfix::postfix;
 
 mod compile;
 mod execute;

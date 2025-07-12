@@ -7,7 +7,43 @@ use crate::parse::{CountModifier, GregexpToken};
 pub enum GregexpSegment {
     Character(char),
     Concat,
-    CountModifier(CountModifier),
+    Star,
+    AtLeastOnce,
+    AtMostOnce,
+}
+
+fn write_with_mod<F: Fn(&mut Vec<GregexpSegment>)>(
+    buffer: &mut Vec<GregexpSegment>,
+    writer: F,
+    modifier: &Option<CountModifier>,
+) {
+    writer(buffer);
+
+    match modifier {
+        None => (),
+        Some(CountModifier::Star) => buffer.push(GregexpSegment::Star),
+        Some(CountModifier::AtLeastOnce) => buffer.push(GregexpSegment::AtLeastOnce),
+        Some(CountModifier::AtMostOnce) => buffer.push(GregexpSegment::AtMostOnce),
+        Some(CountModifier::Exact(repeats)) => {
+            for _ in 0..(repeats - 1) {
+                writer(buffer);
+                buffer.push(GregexpSegment::Concat);
+            }
+        }
+        Some(CountModifier::Range(ranged)) => {
+            for _ in 0..(ranged.start - 1) {
+                writer(buffer);
+                buffer.push(GregexpSegment::Concat);
+            }
+
+            let opt = ranged.end - ranged.start;
+            for _ in 0..opt {
+                writer(buffer);
+                buffer.push(GregexpSegment::AtMostOnce);
+                buffer.push(GregexpSegment::Concat);
+            }
+        }
+    }
 }
 
 fn postfix_sequence(parts: &Vec<GregexpToken>, buffer: &mut Vec<GregexpSegment>) {
@@ -22,11 +58,13 @@ fn postfix_sequence(parts: &Vec<GregexpToken>, buffer: &mut Vec<GregexpSegment>)
 }
 
 fn postfix_exact(value: char, modifier: &Option<CountModifier>, buffer: &mut Vec<GregexpSegment>) {
-    // TODO: simplification of exact and range?
-    buffer.push(GregexpSegment::Character(value));
-    if let Some(modifier) = modifier.clone() {
-        buffer.push(GregexpSegment::CountModifier(modifier))
-    }
+    write_with_mod(
+        buffer,
+        |buffer| {
+            buffer.push(GregexpSegment::Character(value));
+        },
+        modifier,
+    );
 }
 
 fn postfix_group(
@@ -34,10 +72,13 @@ fn postfix_group(
     modifier: &Option<CountModifier>,
     buffer: &mut Vec<GregexpSegment>,
 ) {
-    postfix_any(expr, buffer);
-    if let Some(modifier) = modifier.clone() {
-        buffer.push(GregexpSegment::CountModifier(modifier));
-    }
+    write_with_mod(
+        buffer,
+        |buffer| {
+            postfix_any(expr, buffer);
+        },
+        modifier,
+    );
 }
 
 fn postfix_any(gregexp: &GregexpToken, buffer: &mut Vec<GregexpSegment>) {
@@ -62,13 +103,9 @@ pub fn postfix_to_string(postfix: &Vec<GregexpSegment>) -> String {
         match segment {
             GregexpSegment::Character(a) => buffer += &a.to_string(),
             GregexpSegment::Concat => buffer += ".",
-            GregexpSegment::CountModifier(modifier) => match modifier {
-                CountModifier::Star => buffer += "*",
-                CountModifier::AtLeastOnce => buffer += "+",
-                CountModifier::AtMostOnce => buffer += "?",
-                CountModifier::Exact(n) => buffer += &format!("^{n}"),
-                CountModifier::Range(r) => buffer += &format!("^{{{0}-{1}}}", r.start, r.end),
-            },
+            GregexpSegment::AtLeastOnce => buffer += "+",
+            GregexpSegment::AtMostOnce => buffer += "?",
+            GregexpSegment::Star => buffer += "*",
         }
     }
 
@@ -80,21 +117,49 @@ mod tests {
     use crate::parse::parse;
     use crate::postfix::{postfix, postfix_to_string};
 
+    fn make_postfix_str(expr: &str) -> String {
+        let expr = parse(expr).unwrap();
+        let postfix = postfix(&expr);
+        postfix_to_string(&postfix)
+    }
+
     #[test]
     fn test_postfix_simple() {
-        let expr = parse("a(bb)+a").unwrap();
-        let postfix = postfix(&expr);
-        let postfix_str = postfix_to_string(&postfix);
-
-        assert_eq!(postfix_str, "abb.+.a.")
+        assert_eq!(make_postfix_str("a(bb)+a"), "abb.+.a.")
     }
 
     #[test]
     fn test_simple_letter() {
-        let expr = parse("a?a?aa").unwrap();
-        let postfix = postfix(&expr);
-        let postfix_str = postfix_to_string(&postfix);
+        assert_eq!(make_postfix_str("a?a?aa"), "a?a?.a.a.");
+    }
 
-        assert_eq!(postfix_str, "a?a?.a.a.");
+    #[test]
+    fn test_expand_exact_single() {
+        assert_eq!(make_postfix_str("a{5}"), "aa.a.a.a.");
+    }
+
+    #[test]
+    fn test_expand_range_single() {
+        assert_eq!(make_postfix_str("a{2,4}"), "aa.a?.a?.");
+    }
+
+    #[test]
+    fn test_expand_exact_group() {
+        assert_eq!(make_postfix_str("(ab){2}"), "ab.ab..");
+    }
+
+    #[test]
+    fn test_expand_range_group() {
+        assert_eq!(make_postfix_str("(ab){2,3}"), "ab.ab..ab.?.")
+    }
+
+    #[test]
+    fn test_range_edge_case() {
+        assert_eq!(make_postfix_str("a{1,2}"), "aa?.")
+    }
+
+    #[test]
+    fn test_exact_edge_case() {
+        assert_eq!(make_postfix_str("a{1}"), "a")
     }
 }
