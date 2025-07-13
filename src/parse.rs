@@ -1,6 +1,7 @@
 //! Recursive descent parser for a "gregexp". The syntax is the following:
 //!
-//! <expr> : (<group><modifier>?|<char><modifier>?|<char-group><modifier>?)*
+//! <expr> : (<group><modifier>?|<char><modifier>?|<char-group><modifier>?|<any-match><modifier>?)*
+//! <any-match> : .
 //! <group> : (<expr>(|<expr>)*)
 //! <char> : 0-9, a-z, A-Z, !@#$%&*, \<escaped char>
 //! <char-group> : [ <range-expr> ]
@@ -14,7 +15,6 @@ use std::collections::HashSet;
 /// Input stream that is peekable. Used to facilitated parsing and error reporting.
 use std::iter::{Enumerate, Peekable};
 use std::ops::Range;
-use std::rc::Rc;
 use std::str::Chars;
 use thiserror::Error;
 
@@ -28,6 +28,7 @@ const CHAR_MODIFIER_RANGE_START: char = '{';
 const CHAR_MODIFIER_RANGE_END: char = '}';
 const CHAR_MODIFIER_AT_MOST_ONCE: char = '?';
 const CHAR_OR: char = '|';
+const CHAR_ANY: char = '.';
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CountModifier {
@@ -44,6 +45,7 @@ pub enum GregExpToken {
     Group(Vec<GregExpToken>, Option<CountModifier>),
     CharacterGroup(HashSet<char>, Option<CountModifier>),
     ExactMatch(char, Option<CountModifier>),
+    AnyMatch(Option<CountModifier>),
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, Error)]
@@ -107,7 +109,7 @@ fn parse_number(input: &mut TokenStream) -> ParsingResult<usize> {
     Ok(number)
 }
 
-fn is_valid_character(c: char) -> bool {
+fn is_valid_literal(c: char) -> bool {
     match c {
         c if c >= 'a' && c <= 'z' => true,
         c if c >= 'A' && c <= 'Z' => true,
@@ -132,15 +134,15 @@ fn is_valid_character(c: char) -> bool {
 }
 
 /// Checks if the next character is valid for a single character input
-fn next_character_is_valid(input: &mut TokenStream) -> bool {
+fn next_character_is_valid_literal(input: &mut TokenStream) -> bool {
     match input.peek() {
         None => false,
-        Some((_, c)) => is_valid_character(*c),
+        Some((_, c)) => is_valid_literal(*c),
     }
 }
 
 /// Parses a single character a literal regex input. Will read escaped character
-fn parse_single_character(input: &mut TokenStream) -> ParsingResult<char> {
+fn parse_single_literal(input: &mut TokenStream) -> ParsingResult<char> {
     match input.next() {
         None => Err(ParsingError::EOS2("a character".into())),
         Some((_, '\\')) => match input.next() {
@@ -161,7 +163,7 @@ fn parse_single_character(input: &mut TokenStream) -> ParsingResult<char> {
             }),
         },
         // Parse after the escape to make sure escape sequences are completely eaten
-        Some((_, c)) if is_valid_character(c) => Ok(c),
+        Some((_, c)) if is_valid_literal(c) => Ok(c),
         Some((pos, found)) => Err(ParsingError::UnexpectedCharacter2 {
             description: "a valid character".into(),
             found,
@@ -209,7 +211,7 @@ fn parse_modifier(input: &mut TokenStream) -> ParsingResult<Option<CountModifier
 }
 
 fn parse_char_group(input: &mut TokenStream) -> ParsingResult<HashSet<char>> {
-    let first = parse_single_character(input)?;
+    let first = parse_single_literal(input)?;
 
     let mut values = HashSet::new();
 
@@ -218,7 +220,7 @@ fn parse_char_group(input: &mut TokenStream) -> ParsingResult<HashSet<char>> {
         // It's a 'dynamic' ascii range.
         Some((_, '-')) => {
             expect_char!('-', input);
-            let second = parse_single_character(input)?;
+            let second = parse_single_literal(input)?;
             for c in first..=second {
                 values.insert(c);
             }
@@ -226,8 +228,8 @@ fn parse_char_group(input: &mut TokenStream) -> ParsingResult<HashSet<char>> {
         // It's a sequence of characters that are or-d
         Some((_, _)) => {
             values.insert(first);
-            while next_character_is_valid(input) {
-                values.insert(parse_single_character(input)?);
+            while next_character_is_valid_literal(input) {
+                values.insert(parse_single_literal(input)?);
             }
         }
     }
@@ -269,8 +271,13 @@ fn parse_expr(input: &mut TokenStream) -> ParsingResult<GregExpToken> {
             }
             (_, CHAR_GROUP_END) => break,
             (_, CHAR_OR) => break,
+            (_, CHAR_ANY) => {
+                expect_char!(CHAR_ANY, input);
+                let modifier = parse_modifier(input)?;
+                ret.push(GregExpToken::AnyMatch(modifier));
+            }
             (_, _) => {
-                let char = parse_single_character(input)?;
+                let char = parse_single_literal(input)?;
                 let modifier = parse_modifier(input)?;
                 ret.push(GregExpToken::ExactMatch(char, modifier))
             }

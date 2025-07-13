@@ -30,6 +30,10 @@ pub enum Node {
         value: char,
         next: OnceCell<Weak<Node>>,
     },
+    AnyMatch {
+        id: usize,
+        next: OnceCell<Weak<Node>>,
+    },
     CharsetMatch {
         id: usize,
         charset: HashSet<char>,
@@ -51,6 +55,7 @@ impl Node {
             Node::CharsetMatch { id, .. } => id,
             Node::Choice { id, .. } => id,
             Node::Matching { id, .. } => id,
+            Node::AnyMatch { id, .. } => id,
         }
     }
 }
@@ -77,7 +82,7 @@ struct Fragment {
 }
 fn compile_character(
     value: char,
-    state_table: &mut NodeTable,
+    node_table: &mut NodeTable,
     stack: &mut Vec<Fragment>,
     next_id: &mut usize,
 ) {
@@ -87,7 +92,23 @@ fn compile_character(
         next: OnceCell::new(),
     });
 
-    state_table.insert(*next_id, node.clone());
+    node_table.insert(*next_id, node.clone());
+
+    stack.push(Fragment {
+        node,
+        outputs: vec![NodeOutput::Simple(*next_id)],
+    });
+
+    *next_id += 1;
+}
+
+fn compile_any_match(node_table: &mut NodeTable, stack: &mut Vec<Fragment>, next_id: &mut usize) {
+    let node = Rc::new(Node::AnyMatch {
+        id: *next_id,
+        next: OnceCell::new(),
+    });
+
+    node_table.insert(*next_id, node.clone());
 
     stack.push(Fragment {
         node,
@@ -99,7 +120,7 @@ fn compile_character(
 
 fn compile_charset(
     charset: HashSet<char>,
-    state_table: &mut NodeTable,
+    node_table: &mut NodeTable,
     stack: &mut Vec<Fragment>,
     next_id: &mut usize,
 ) {
@@ -109,7 +130,7 @@ fn compile_charset(
         next: OnceCell::new(),
     });
 
-    state_table.insert(*next_id, node.clone());
+    node_table.insert(*next_id, node.clone());
 
     stack.push(Fragment {
         node,
@@ -129,7 +150,9 @@ fn attach_all(from: &Fragment, to: &Rc<Node>, node_table: &NodeTable) -> Compila
                     .ok_or(CompilationError::BadLookup(*node_id))?;
 
                 match node.as_ref() {
-                    Node::LiteralMatch { next, .. } | Node::CharsetMatch { next, .. } => {
+                    Node::LiteralMatch { next, .. }
+                    | Node::CharsetMatch { next, .. }
+                    | Node::AnyMatch { next, .. } => {
                         next.set(Rc::downgrade(to))
                             .map_err(|_| CompilationError::DoubleSetOuput(*node_id))?;
                     }
@@ -151,6 +174,7 @@ fn attach_all(from: &Fragment, to: &Rc<Node>, node_table: &NodeTable) -> Compila
                     }
                     Node::LiteralMatch { .. }
                     | Node::CharsetMatch { .. }
+                    | Node::AnyMatch { .. }
                     | Node::Matching { .. } => {
                         Err(CompilationError::ExpectedChoiceOutput(*node_id))?;
                     }
@@ -335,6 +359,9 @@ pub fn compile(postfix: &Vec<GregExpSegment>) -> CompilationResult<Gregexp> {
             GregExpSegment::Set(charset) => {
                 compile_charset(charset.clone(), &mut node_table, &mut stack, &mut next_id)
             }
+            GregExpSegment::AnyMatch => {
+                compile_any_match(&mut node_table, &mut stack, &mut next_id)
+            }
         }
     }
 
@@ -346,6 +373,7 @@ pub fn compile(postfix: &Vec<GregExpSegment>) -> CompilationResult<Gregexp> {
     })
 }
 
+#[allow(unused)]
 pub fn compile_to_dot(exp: &Gregexp) -> String {
     let mut builder = String::new();
     let nodes = &exp.node_table;
@@ -377,6 +405,15 @@ pub fn compile_to_dot(exp: &Gregexp) -> String {
                 for value in charset {
                     builder += &format!("\ta{id} -> a{0}[label=\"{value}\"]\n", next.id());
                 }
+            }
+            Node::AnyMatch { id, next } => {
+                let next = next
+                    .get()
+                    .map(Weak::upgrade)
+                    .flatten()
+                    .expect("Expected a next link");
+
+                builder += &format!("\ta{id} -> a{0}[label=\"<any>\"]\n", next.id());
             }
             Node::Choice { id, outs } => {
                 for out in outs {

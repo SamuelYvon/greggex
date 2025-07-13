@@ -7,7 +7,8 @@ Some help from
 
 ## Syntax
 
- <expr> : (<group><modifier>?|<char><modifier>?|<char-group><modifier>?)*
+ <expr> : (<group><modifier>?|<char><modifier>?|<char-group><modifier>?|<any-match><modifier>?)*
+ <any-match> : .
  <group> : (<expr>(|<expr>)*)
  <char> : 0-9, a-z, A-Z, !@#$%&*, \<escaped char>
  <char-group> : [ <range-expr> | <char>* ]

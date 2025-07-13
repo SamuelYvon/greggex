@@ -6,6 +6,7 @@ use std::collections::HashSet;
 
 #[derive(Debug)]
 pub enum GregExpSegment {
+    AnyMatch,
     Character(char),
     Set(HashSet<char>),
     Or,
@@ -104,8 +105,17 @@ fn postfix_character_group(
     );
 }
 
+fn postfix_any_match(modifier: &Option<CountModifier>, buffer: &mut Vec<GregExpSegment>) {
+    write_with_mod(
+        buffer,
+        |buffer| buffer.push(GregExpSegment::AnyMatch),
+        modifier,
+    )
+}
+
 fn postfix_any(gregexp: &GregExpToken, buffer: &mut Vec<GregExpSegment>) {
     match gregexp {
+        GregExpToken::AnyMatch(modifier) => postfix_any_match(modifier, buffer),
         GregExpToken::Sequence(parts) => postfix_sequence(parts, buffer),
         GregExpToken::Group(exprs, modifier) => postfix_group(exprs, modifier, buffer),
         GregExpToken::CharacterGroup(charset, modifier) => {
@@ -121,6 +131,7 @@ pub fn postfix(gregexp: &GregExpToken) -> Vec<GregExpSegment> {
     buffer
 }
 
+#[allow(unused)]
 pub fn postfix_to_string(postfix: &Vec<GregExpSegment>) -> String {
     let mut buffer = String::new();
     let mut charsets = vec![];
@@ -139,6 +150,9 @@ pub fn postfix_to_string(postfix: &Vec<GregExpSegment>) -> String {
 
                 buffer += &format!("<s{0}>", charsets.len() + 1);
                 charsets.push(values.join(","));
+            }
+            GregExpSegment::AnyMatch => {
+                buffer += "<any>";
             }
         }
     }

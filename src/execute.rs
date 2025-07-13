@@ -20,7 +20,9 @@ fn add_node(node: &OnceCell<Weak<Node>>, future: &mut HashSet<usize>) {
     }
 
     match node.as_ref() {
-        Node::LiteralMatch { id, .. } | Node::CharsetMatch { id, .. } => {
+        Node::LiteralMatch { id, .. }
+        | Node::CharsetMatch { id, .. }
+        | Node::AnyMatch { id, .. } => {
             future.insert(*id);
         }
         Node::Choice { outs: out, .. } => {
@@ -66,6 +68,9 @@ pub fn execute(input: &str, gregexp: &Gregexp) -> bool {
                     if charset.contains(&current_char) {
                         add_node(&next, &mut future);
                     }
+                }
+                Node::AnyMatch { next, .. } => {
+                    add_node(&next, &mut future);
                 }
                 Node::Choice { .. } => continue,
                 Node::Matching { .. } => continue,
@@ -165,6 +170,16 @@ mod tests {
             "([a-z]|[A-Z]|[0-9]|[\\._%+-]){1,64}@(([a-z]|[A-Z]|[0-9]){1,63}\\.){1,125}([a-z]|[A-Z]){2,63}",
         );
         assert!(execute("anemail@host.com", &compiled));
+    }
+
+    #[test]
+    fn test_any_match() {
+        let compiled = _compile(".*");
+
+        assert!(execute(".*", &compiled));
+        assert!(execute("anything-at-all", &compiled));
+        assert!(execute("this does not care", &compiled));
+        assert!(execute("what the input is", &compiled));
     }
 
     fn make_pathlogical_expr(n: usize) -> String {
