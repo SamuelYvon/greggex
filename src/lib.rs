@@ -7,8 +7,6 @@ mod compile;
 mod execute;
 mod lexer;
 mod parse;
-mod postfix;
-
 // pub fn matches(input: &str, expr: &str) -> bool {
 //     let parsed = parse(expr).unwrap();
 //     let post = postfix(&parsed);

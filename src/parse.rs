@@ -10,6 +10,7 @@
 //! <modifier>: *,+,{l,h}
 
 use crate::lexer::{Token, TokenPos, lex};
+use crate::parse::ParsingError::UnexpectedToken;
 use std::borrow::Cow;
 use std::collections::HashSet;
 /// Input stream that is peekable. Used to facilitated parsing and error reporting.
@@ -44,6 +45,29 @@ pub enum AST {
     ExactMatch(char),
     InGroup(HashSet<char>),
     Blank,
+}
+
+impl AST {
+    pub fn is_blank(&self) -> bool {
+        match self {
+            AST::Blank => true,
+            _ => false,
+        }
+    }
+
+    pub fn into_postfix(self: &Rc<Self>, traversal: &mut Vec<Rc<AST>>) {
+        match self.as_ref() {
+            AST::Concat(left, right) => {
+                traversal.push(Rc::clone(left));
+                traversal.push(Rc::clone(right));
+                traversal.push(Rc::clone(self));
+            }
+            AST::AnyMatch | AST::Repeat(_, _) | AST::ExactMatch(_) | AST::InGroup(_) => {
+                traversal.push(Rc::clone(self));
+            }
+            AST::Blank => (),
+        }
+    }
 }
 
 #[derive(Debug, Error)]
@@ -132,8 +156,8 @@ fn parse_char_group(stream: &mut TokenStream) -> ParsingResult<Rc<AST>> {
         }
     }
 
-    expect_character!(crate::lexer::Token::CharGroupEnd, stream);
-    todo!("Create the proper return type")
+    expect_character!(Token::CharGroupEnd, stream);
+    Ok(Rc::new(AST::InGroup(result)))
 }
 
 fn parse_modifier(stream: &mut TokenStream) -> ParsingResult<Option<CountModifier>> {
@@ -174,20 +198,29 @@ fn parse_modifier(stream: &mut TokenStream) -> ParsingResult<Option<CountModifie
     }
 }
 
-fn parse_expr(stream: &mut TokenStream) -> Rc<AST> {
+fn parse_expr(stream: &mut TokenStream) -> ParsingResult<Rc<AST>> {
     let mut root = Rc::new(AST::Blank);
 
     macro_rules! push {
         ($node:expr) => {{
             let node: Rc<AST> = $node;
-            root = Rc::new(AST::Concat(root, node));
+
+            assert!(!node.is_blank(), "We should never push blanks.");
+
+            // Avoid having a CONCAT(BLANK, XYZ)
+            // We never push blanksk
+            if root.is_blank() {
+                root = node;
+            } else {
+                root = Rc::new(AST::Concat(root, node));
+            }
         }};
     }
 
     macro_rules! with_modifier {
         ($node:expr) => {{
             let node: Rc<AST> = $node;
-            if let Ok(Some(modifier)) = parse_modifier(stream) {
+            if let Some(modifier) = parse_modifier(stream)? {
                 Rc::new(AST::Repeat(node, modifier))
             } else {
                 node
@@ -195,43 +228,90 @@ fn parse_expr(stream: &mut TokenStream) -> Rc<AST> {
         }};
     }
 
-    match stream.next() {
-        None => todo!(),
-        Some(TokenPos(token, pos)) => match token {
-            Token::Character(chr) => {
-                let node = with_modifier!(Rc::new(AST::ExactMatch(chr)));
-                push!(node);
-            }
-            Token::CharAny => {
-                push!(with_modifier!(Rc::new(AST::AnyMatch)));
-            }
-            Token::GroupStart => {
-                let group = with_modifier!(parse_expr(stream));
-                push!(group);
-                expect_character!(crate::lexer::Token::CharGroupEnd, stream);
-            }
-            Token::CharGroupStart => parse_char_group(stream),
-            // This will get matched recursively, so we abort here
-            Token::GroupEnd => (),
-            // Should **not** be matched in this loop
-            Token::CharGroupRange => todo!(),
-            Token::CharGroupEnd => todo!(),
-            Token::ModStar => todo!(),
-            Token::ModAtLeastOnce => todo!(),
-            Token::ModAtMostOnce => todo!(),
-            Token::ModGroupStart => todo!(),
-            Token::ModGroupEnd => todo!(),
-            Token::ModComma => todo!(),
-        },
-    };
+    loop {
+        match stream.next() {
+            None => break,
+            Some(TokenPos(token, pos)) => match token {
+                Token::Character(chr) => {
+                    let node = with_modifier!(Rc::new(AST::ExactMatch(chr)));
+                    push!(node);
+                }
+                Token::CharAny => {
+                    push!(with_modifier!(Rc::new(AST::AnyMatch)));
+                }
+                Token::GroupStart => {
+                    let group = with_modifier!(parse_expr(stream)?);
+                    push!(group);
+                }
+                Token::CharGroupStart => {
+                    let group = parse_char_group(stream)?;
+                    push!(group);
+                }
+                // This will get matched recursively, so we abort here
+                Token::GroupEnd => break,
+                // Should **not** be matched in this loop
+                found @ (Token::CharGroupRange
+                | Token::CharGroupEnd
+                | Token::ModStar
+                | Token::ModAtLeastOnce
+                | Token::ModAtMostOnce
+                | Token::ModGroupStart
+                | Token::ModGroupEnd
+                | Token::ModComma) => {
+                    return Err(UnexpectedToken {
+                        expected: "a valid start of next group".into(),
+                        found,
+                        pos,
+                    });
+                }
+            },
+        };
+    }
 
-    root
+    Ok(root)
 }
 
 pub fn parse(input: &str) -> ParsingResult<Rc<AST>> {
     let tokens = lex(input);
-    let ast = parse_expr(&mut tokens.into_iter().peekable());
+    let ast = parse_expr(&mut tokens.into_iter().peekable())?;
     Ok(ast)
+}
+
+/// Create a postfix representation of the expression. Useful for debugging and testing the
+/// parsing.
+pub fn postfix<A: AsRef<AST>>(tree: A) -> String {
+    let mut buff = String::new();
+    
+    match tree.as_ref() {
+        AST::Concat(l, r) => {
+            buff += &postfix(l);
+            buff += &postfix(r);
+            buff += ".";
+        }
+        AST::Repeat(node, count) => {
+            buff += &postfix(node);
+            match count {
+                CountModifier::Star => buff += "^*",
+                CountModifier::AtLeastOnce => buff += "+",
+                CountModifier::AtMostOnce => buff += "?",
+                CountModifier::Exact(n) => buff += &format!("^{n}"),
+                CountModifier::Range(r) => buff += &format!("^{{{0}-{1}", r.start, r.end),
+            }
+        }
+        AST::AnyMatch => buff += "*",
+        AST::ExactMatch(c) => buff += &c.to_string(),
+        AST::InGroup(grp) => {
+            let mut sorted = grp.iter().map(|c| c.to_string()).collect::<Vec<_>>();
+            sorted.sort();
+
+            buff += "[";
+            buff += &sorted.join(",");
+            buff += "]";
+        }
+        AST::Blank => (),
+    }
+
+    buff
 }
 
 #[cfg(test)]
@@ -271,15 +351,18 @@ mod tests {
     //     }
     // }
     //
-    // #[test]
-    // fn test_parsing_char_group() {
-    //     let expr = "[a-z]";
-    //     let result = parse_expr(&mut stream_of(expr)).unwrap();
-    //
-    //     if let GregExpToken::Sequence(vec) = result {
-    //         assert!(matches!(vec[0], GregExpToken::CharacterGroup(_, None)));
-    //     } else {
-    //         panic!("Expected Vec<CharGroup>, got: {:?}", result);
-    //     }
-    // }
+
+    #[test]
+    fn test_parsing_simple() {
+        let expr = "(he)+llo";
+        let result = parse(expr).unwrap();
+        assert_eq!(postfix(result), "he.+l.l.o.");
+    }
+
+    #[test]
+    fn test_parsing_char_group() {
+        let expr = "[a-z]";
+        let result = parse(expr).unwrap();
+        dbg!(result);
+    }
 }
