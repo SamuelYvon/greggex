@@ -1,4 +1,4 @@
-use crate::parse::AST;
+use crate::parse::{AST, CountModifier};
 use std::cell::OnceCell;
 use std::collections::{HashMap, HashSet};
 use std::rc::{Rc, Weak};
@@ -343,27 +343,28 @@ pub fn compile(tree: Rc<AST>) -> CompilationResult<GregExp> {
     let mut stack: Vec<Fragment> = Vec::new();
     let mut postfix_traversal: Vec<Rc<AST>> = Vec::new();
     tree.into_postfix(&mut postfix_traversal);
-    
-    
-    for segment in postfix_traversal {
+
+    for segment in postfix_traversal.into_iter() {
         match segment.as_ref() {
-            AST::ExactMatch(c) => {
-                compile_character(*c, &mut node_table, &mut stack, &mut next_id)
-            }
-            GregExpSegment::Concat => compile_concat(&node_table, &mut stack)?,
-            GregExpSegment::Or => compile_or(&mut node_table, &mut stack, &mut next_id)?,
-            GregExpSegment::AtMostOnce => {
+            AST::ExactMatch(c) => compile_character(*c, &mut node_table, &mut stack, &mut next_id),
+            AST::Concat(_, _) => compile_concat(&node_table, &mut stack)?,
+            // GregExpSegment::Or => compile_or(&mut node_table, &mut stack, &mut next_id)?,
+            AST::Repeat(_, CountModifier::AtMostOnce) => {
                 compile_at_most_once(&mut node_table, &mut stack, &mut next_id)?
             }
-            GregExpSegment::AtLeastOnce => {
+            AST::Repeat(_, CountModifier::AtLeastOnce) => {
                 compile_at_least_once(&mut node_table, &mut stack, &mut next_id)?
             }
-            GregExpSegment::Star => compile_star(&mut node_table, &mut stack, &mut next_id)?,
-            GregExpSegment::Set(charset) => {
+            AST::Repeat(_, CountModifier::Star) => {
+                compile_star(&mut node_table, &mut stack, &mut next_id)?
+            }
+            AST::InGroup(charset) => {
                 compile_charset(charset.clone(), &mut node_table, &mut stack, &mut next_id)
             }
-            GregExpSegment::AnyMatch => {
-                compile_any_match(&mut node_table, &mut stack, &mut next_id)
+            AST::AnyMatch => compile_any_match(&mut node_table, &mut stack, &mut next_id),
+            &AST::Blank => (),
+            &AST::Repeat(_, CountModifier::Exact(_)) | &AST::Repeat(_, CountModifier::Range(_)) => {
+                todo!("Need to go through a simplification phase")
             }
         }
     }
@@ -435,4 +436,9 @@ pub fn compile_to_dot(exp: &GregExp) -> String {
 
     builder += "};";
     builder
+}
+
+#[cfg(test)]
+mod tests {
+    
 }
