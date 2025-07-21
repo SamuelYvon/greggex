@@ -348,7 +348,7 @@ pub fn compile(tree: Rc<AST>) -> CompilationResult<GregExp> {
         match segment.as_ref() {
             AST::ExactMatch(c) => compile_character(*c, &mut node_table, &mut stack, &mut next_id),
             AST::Concat(_, _) => compile_concat(&node_table, &mut stack)?,
-            // GregExpSegment::Or => compile_or(&mut node_table, &mut stack, &mut next_id)?,
+            AST::Or(_, _) => compile_or(&mut node_table, &mut stack, &mut next_id)?,
             AST::Repeat(_, CountModifier::AtMostOnce) => {
                 compile_at_most_once(&mut node_table, &mut stack, &mut next_id)?
             }
@@ -364,7 +364,7 @@ pub fn compile(tree: Rc<AST>) -> CompilationResult<GregExp> {
             AST::AnyMatch => compile_any_match(&mut node_table, &mut stack, &mut next_id),
             &AST::Blank => (),
             &AST::Repeat(_, CountModifier::Exact(_)) | &AST::Repeat(_, CountModifier::Range(_)) => {
-                todo!("Need to go through a simplification phase")
+                panic!("Received complex repeat modifiers, should have been simplified");
             }
         }
     }
@@ -382,7 +382,7 @@ pub fn compile_to_dot(exp: &GregExp) -> String {
     let mut builder = String::new();
     let nodes = &exp.node_table;
 
-    builder += "digraph Greg-x {\n";
+    builder += "digraph Greggex {\n";
 
     for id in nodes.keys() {
         builder += &format!("\ta{id} [label=\"{id}\"]\n");
@@ -434,11 +434,9 @@ pub fn compile_to_dot(exp: &GregExp) -> String {
         }
     }
 
-    builder += "};";
+    builder += "}";
     builder
 }
 
 #[cfg(test)]
-mod tests {
-    
-}
+mod tests {}

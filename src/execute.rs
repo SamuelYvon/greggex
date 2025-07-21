@@ -159,9 +159,41 @@ mod tests {
     }
 
     #[test]
+    fn test_or() {
+        let compiled = _compile("([a-z]|[0-9])");
+        assert!(execute("a", &compiled));
+        assert!(execute("z", &compiled));
+        assert!(execute("0", &compiled));
+        assert!(execute("9", &compiled));
+        assert!(!execute("@", &compiled));
+    }
+
+    #[test]
+    fn test_multiple_ors() {
+        let compiled = _compile("([0-1]|[2-3]|[4-5]|[6-7])");
+        assert!(execute("0", &compiled));
+        assert!(execute("1", &compiled));
+        assert!(execute("2", &compiled));
+        assert!(execute("3", &compiled));
+        assert!(execute("4", &compiled));
+        assert!(execute("5", &compiled));
+        assert!(execute("6", &compiled));
+        assert!(execute("7", &compiled));
+        assert!(!execute("8", &compiled));
+        assert!(!execute("9", &compiled));
+    }
+
+    #[test]
+    fn test_dot() {
+        let compiled = _compile("a\\.a");
+        assert!(execute("a.a", &compiled));
+        assert!(!execute("aaa", &compiled));
+    }
+
+    #[test]
     fn a_bad_email_regex() {
         let compiled = _compile(
-            "([a-z]|[A-Z]|[0-9]|[\\._%+-]){1,64}@(([a-z]|[A-Z]|[0-9]){1,63}\\.){1,125}([a-z]|[A-Z]){2,63}",
+            "([a-z]|[A-Z]|[0-9]|[\\._%\\+\\-]){1,64}@(([a-z]|[A-Z]|[0-9]){1,63}\\.){1,125}([a-z]|[A-Z]){2,63}",
         );
         assert!(execute("anemail@host.com", &compiled));
     }

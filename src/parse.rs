@@ -28,18 +28,10 @@ pub enum CountModifier {
     Range(Range<usize>),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum GregExpToken {
-    Sequence(Vec<GregExpToken>),
-    Group(Vec<GregExpToken>, Option<CountModifier>),
-    CharacterGroup(HashSet<char>, Option<CountModifier>),
-    ExactMatch(char, Option<CountModifier>),
-    AnyMatch(Option<CountModifier>),
-}
-
 #[derive(Debug, Clone)]
 pub enum AST {
     Concat(Rc<AST>, Rc<AST>),
+    Or(Rc<AST>, Rc<AST>),
     Repeat(Rc<AST>, CountModifier),
     AnyMatch,
     ExactMatch(char),
@@ -57,12 +49,16 @@ impl AST {
 
     pub fn into_postfix(self: &Rc<Self>, traversal: &mut Vec<Rc<AST>>) {
         match self.as_ref() {
-            AST::Concat(left, right) => {
-                traversal.push(Rc::clone(left));
-                traversal.push(Rc::clone(right));
+            AST::Concat(left, right) | AST::Or(left, right) => {
+                left.into_postfix(traversal);
+                right.into_postfix(traversal);
                 traversal.push(Rc::clone(self));
             }
-            AST::AnyMatch | AST::Repeat(_, _) | AST::ExactMatch(_) | AST::InGroup(_) => {
+            AST::Repeat(node, _) => {
+                node.into_postfix(traversal);
+                traversal.push(Rc::clone(self));
+            }
+            AST::AnyMatch | AST::ExactMatch(_) | AST::InGroup(_) => {
                 traversal.push(Rc::clone(self));
             }
             AST::Blank => (),
@@ -79,9 +75,7 @@ pub enum ParsingError {
         pos: usize,
     },
     #[error("Unexpected end of input, expected {0}")]
-    EOS(char),
-    #[error("Unexpected end of input, expected {0}")]
-    EOS2(Cow<'static, str>),
+    EOS(Cow<'static, str>),
 }
 type ParsingResult<T> = Result<T, ParsingError>;
 
@@ -109,6 +103,7 @@ fn parse_number(stream: &mut TokenStream) -> ParsingResult<usize> {
         if let Some(digit) = c.to_digit(10) {
             result *= 10;
             result += digit as usize;
+            stream.next();
         } else {
             break;
         }
@@ -122,12 +117,12 @@ fn parse_number(stream: &mut TokenStream) -> ParsingResult<usize> {
 fn parse_literal(stream: &mut TokenStream) -> ParsingResult<char> {
     let peek = stream.peek().cloned();
     match peek {
-        None => Err(ParsingError::EOS2("a valid character".into())),
+        None => Err(ParsingError::EOS("a valid character".into())),
         Some(TokenPos(Token::Character(c), _)) => {
             stream.next();
             Ok(c)
         }
-        Some(TokenPos(found, pos)) => Err(ParsingError::UnexpectedToken {
+        Some(TokenPos(found, pos)) => Err(UnexpectedToken {
             expected: "a valid character".into(),
             found,
             pos,
@@ -144,7 +139,7 @@ fn parse_char_group(stream: &mut TokenStream) -> ParsingResult<Rc<AST>> {
     result.insert(first_char);
 
     if let Some(TokenPos(Token::CharGroupRange, _)) = stream.peek() {
-        expect_character!(crate::lexer::Token::CharGroupRange, stream);
+        expect_character!(Token::CharGroupRange, stream);
         let second_char = parse_literal(stream)?;
 
         for chr in first_char..=second_char {
@@ -165,31 +160,31 @@ fn parse_modifier(stream: &mut TokenStream) -> ParsingResult<Option<CountModifie
         None => Ok(None),
         Some(TokenPos(token, _)) => Ok(match token {
             Token::ModStar => {
-                expect_character!(crate::lexer::Token::ModStar, stream);
+                expect_character!(Token::ModStar, stream);
                 Some(CountModifier::Star)
             }
             Token::ModAtLeastOnce => {
-                expect_character!(crate::lexer::Token::ModAtLeastOnce, stream);
+                expect_character!(Token::ModAtLeastOnce, stream);
                 Some(CountModifier::AtLeastOnce)
             }
             Token::ModAtMostOnce => {
-                expect_character!(crate::lexer::Token::ModAtMostOnce, stream);
+                expect_character!(Token::ModAtMostOnce, stream);
                 Some(CountModifier::AtMostOnce)
             }
             Token::ModGroupStart => {
-                expect_character!(crate::lexer::Token::ModGroupStart, stream);
+                expect_character!(Token::ModGroupStart, stream);
 
                 let start = parse_number(stream)?;
 
                 let range = if let Some(TokenPos(Token::ModComma, _)) = stream.peek() {
-                    expect_character!(crate::lexer::Token::ModComma, stream);
+                    expect_character!(Token::ModComma, stream);
                     let end = parse_number(stream)?;
                     CountModifier::Range(start..end)
                 } else {
                     CountModifier::Exact(start)
                 };
 
-                expect_character!(crate::lexer::Token::ModGroupEnd, stream);
+                expect_character!(Token::ModGroupEnd, stream);
 
                 Some(range)
             }
@@ -198,8 +193,48 @@ fn parse_modifier(stream: &mut TokenStream) -> ParsingResult<Option<CountModifie
     }
 }
 
+/// Expand a complex repeat modifier into a simpler one. This creates a tree of [AST::Concat].
+fn expand_complex_repeat(repeated: Rc<AST>, required: usize, at_most: usize) -> Rc<AST> {
+    assert!(at_most >= required);
+
+    let mut sequence = Vec::with_capacity(at_most);
+
+    for _ in 0..required {
+        sequence.push(Rc::clone(&repeated));
+    }
+
+    for _ in required..at_most {
+        sequence.push(Rc::new(AST::Repeat(
+            Rc::clone(&repeated),
+            CountModifier::AtMostOnce,
+        )));
+    }
+
+    sequence
+        .iter()
+        .skip(1)
+        .fold(Rc::clone(&sequence[0]), |acc, item| {
+            Rc::new(AST::Concat(Rc::clone(&acc), Rc::clone(item)))
+        })
+}
+
+/// Simplify a counter modifier in a version that does not use a fixed count nor
+/// a range. We call these token "complex repeats". The actual expansion is done in
+/// [expand_complex_repeat].
+fn simplify_modifier(repeated: Rc<AST>, count_modifier: CountModifier) -> Rc<AST> {
+    match count_modifier {
+        simple @ (CountModifier::Star | CountModifier::AtLeastOnce | CountModifier::AtMostOnce) => {
+            Rc::new(AST::Repeat(repeated, simple))
+        }
+        CountModifier::Exact(n) => expand_complex_repeat(repeated, n, n),
+        CountModifier::Range(range) => expand_complex_repeat(repeated, range.start, range.end),
+    }
+}
+
 fn parse_expr(stream: &mut TokenStream) -> ParsingResult<Rc<AST>> {
     let mut root = Rc::new(AST::Blank);
+
+    let mut or_stack = vec![];
 
     macro_rules! push {
         ($node:expr) => {{
@@ -220,8 +255,9 @@ fn parse_expr(stream: &mut TokenStream) -> ParsingResult<Rc<AST>> {
     macro_rules! with_modifier {
         ($node:expr) => {{
             let node: Rc<AST> = $node;
+
             if let Some(modifier) = parse_modifier(stream)? {
-                Rc::new(AST::Repeat(node, modifier))
+                simplify_modifier(node, modifier)
             } else {
                 node
             }
@@ -244,11 +280,35 @@ fn parse_expr(stream: &mut TokenStream) -> ParsingResult<Rc<AST>> {
                     push!(group);
                 }
                 Token::CharGroupStart => {
-                    let group = parse_char_group(stream)?;
+                    let group = with_modifier!(parse_char_group(stream)?);
                     push!(group);
                 }
+                Token::Or => {
+                    // This breaks the current group and creates a new one, we parse a new expr.
+                    // Push down so the next join does not "grab" the inner group
+                    or_stack.push(root);
+                    root = Rc::new(AST::Blank);
+                }
                 // This will get matched recursively, so we abort here
-                Token::GroupEnd => break,
+                Token::GroupEnd => {
+                    if !or_stack.is_empty() {
+                        or_stack.push(root);
+                        let ored = or_stack
+                            .iter()
+                            .skip(1)
+                            .fold(Rc::clone(&or_stack[0]), |acc, item| {
+                                Rc::new(AST::Or(acc, Rc::clone(item)))
+                            });
+
+                        or_stack.clear();
+
+                        root = with_modifier!(ored);
+                    } else {
+                        root = with_modifier!(root);
+                    }
+
+                    break;
+                }
                 // Should **not** be matched in this loop
                 found @ (Token::CharGroupRange
                 | Token::CharGroupEnd
@@ -281,12 +341,17 @@ pub fn parse(input: &str) -> ParsingResult<Rc<AST>> {
 /// parsing.
 pub fn postfix<A: AsRef<AST>>(tree: A) -> String {
     let mut buff = String::new();
-    
+
     match tree.as_ref() {
         AST::Concat(l, r) => {
             buff += &postfix(l);
             buff += &postfix(r);
             buff += ".";
+        }
+        AST::Or(l, r) => {
+            buff += &postfix(l);
+            buff += &postfix(r);
+            buff += "|";
         }
         AST::Repeat(node, count) => {
             buff += &postfix(node);
@@ -364,5 +429,78 @@ mod tests {
         let expr = "[a-z]";
         let result = parse(expr).unwrap();
         dbg!(result);
+    }
+
+    fn make_postfix_str(expr: &str) -> String {
+        let expr = parse(expr).unwrap();
+        postfix(&expr)
+    }
+
+    #[test]
+    fn test_postfix_simple() {
+        assert_eq!(make_postfix_str("a(bb)+a"), "abb.+.a.")
+    }
+
+    #[test]
+    fn test_simple_letter() {
+        assert_eq!(make_postfix_str("a?a?aa"), "a?a?.a.a.");
+    }
+
+    #[test]
+    fn test_expand_exact_single() {
+        assert_eq!(make_postfix_str("a{5}"), "aa.a.a.a.");
+    }
+
+    #[test]
+    fn test_expand_range_single() {
+        assert_eq!(make_postfix_str("a{2,4}"), "aa.a?.a?.");
+    }
+
+    #[test]
+    fn test_expand_exact_group() {
+        assert_eq!(make_postfix_str("(ab){2}"), "ab.ab..");
+    }
+
+    #[test]
+    fn test_expand_range_group() {
+        assert_eq!(make_postfix_str("(ab){2,3}"), "ab.ab..ab.?.")
+    }
+
+    #[test]
+    fn test_range_edge_case() {
+        assert_eq!(make_postfix_str("a{1,2}"), "aa?.")
+    }
+
+    #[test]
+    fn test_exact_edge_case() {
+        assert_eq!(make_postfix_str("a{1}"), "a")
+    }
+
+    #[test]
+    fn test_char_group_range() {
+        assert_eq!(make_postfix_str("[a-d]"), "[a,b,c,d]");
+    }
+
+    #[test]
+    fn test_char_group() {
+        assert_eq!(make_postfix_str("[abcdef]"), "[a,b,c,d,e,f]");
+    }
+
+    #[test]
+    fn test_choice() {
+        assert_eq!(make_postfix_str("(abc|def)"), "ab.c.de.f.|")
+    }
+
+    #[test]
+    fn test_choices() {
+        assert_eq!(make_postfix_str("(a|b|c|d|e)"), "ab|c|d|e|")
+    }
+
+    #[test]
+    fn test_domain_email_re() {
+        println!(
+            "{0}",
+            make_postfix_str("([a-z]|[A-Z]|[0-9]|[\\._%\\+\\-]){1,2}")
+        );
     }
 }

@@ -22,6 +22,7 @@ pub enum Token {
     CharGroupStart,
     CharGroupEnd,
     CharGroupRange,
+    Or,
 }
 
 impl Display for Token {
@@ -75,6 +76,7 @@ pub fn lex(input: &str) -> Vec<TokenPos> {
             ',' => Token::ModComma,
             '-' => Token::CharGroupRange,
             '.' => Token::CharAny,
+            '|' => Token::Or,
             '\\' => match stream.next() {
                 None => todo!(),
                 Some((_, chr @ '+')) => Token::Character(chr),
@@ -89,6 +91,7 @@ pub fn lex(input: &str) -> Vec<TokenPos> {
                 Some((_, chr @ ',')) => Token::Character(chr),
                 Some((_, chr @ '-')) => Token::Character(chr),
                 Some((_, chr @ '.')) => Token::Character(chr),
+                Some((_, chr @ '|')) => Token::Character(chr),
                 Some((_, chr)) => panic!("Unhandled character: {chr}"),
             },
             chr => panic!("Unhandled character: {chr}"),
