@@ -1,4 +1,4 @@
-use crate::parse::{AST, CountModifier};
+use crate::parse::{Ast, CountModifier};
 use std::cell::OnceCell;
 use std::collections::{HashMap, HashSet};
 use std::rc::{Rc, Weak};
@@ -336,34 +336,34 @@ fn attach_matching_node(
     Ok(last.node.id())
 }
 
-pub fn compile(tree: Rc<AST>) -> CompilationResult<GregExp> {
+pub fn compile(tree: Rc<Ast>) -> CompilationResult<GregExp> {
     let mut node_table: NodeTable = HashMap::new();
     let mut next_id = 0;
 
     let mut stack: Vec<Fragment> = Vec::new();
-    let mut postfix_traversal: Vec<Rc<AST>> = Vec::new();
+    let mut postfix_traversal: Vec<Rc<Ast>> = Vec::new();
     tree.into_postfix(&mut postfix_traversal);
 
     for segment in postfix_traversal.into_iter() {
         match segment.as_ref() {
-            AST::ExactMatch(c) => compile_character(*c, &mut node_table, &mut stack, &mut next_id),
-            AST::Concat(_, _) => compile_concat(&node_table, &mut stack)?,
-            AST::Or(_, _) => compile_or(&mut node_table, &mut stack, &mut next_id)?,
-            AST::Repeat(_, CountModifier::AtMostOnce) => {
+            Ast::ExactMatch(c) => compile_character(*c, &mut node_table, &mut stack, &mut next_id),
+            Ast::Concat(_, _) => compile_concat(&node_table, &mut stack)?,
+            Ast::Or(_, _) => compile_or(&mut node_table, &mut stack, &mut next_id)?,
+            Ast::Repeat(_, CountModifier::AtMostOnce) => {
                 compile_at_most_once(&mut node_table, &mut stack, &mut next_id)?
             }
-            AST::Repeat(_, CountModifier::AtLeastOnce) => {
+            Ast::Repeat(_, CountModifier::AtLeastOnce) => {
                 compile_at_least_once(&mut node_table, &mut stack, &mut next_id)?
             }
-            AST::Repeat(_, CountModifier::Star) => {
+            Ast::Repeat(_, CountModifier::Star) => {
                 compile_star(&mut node_table, &mut stack, &mut next_id)?
             }
-            AST::InGroup(charset) => {
+            Ast::InGroup(charset) => {
                 compile_charset(charset.clone(), &mut node_table, &mut stack, &mut next_id)
             }
-            AST::AnyMatch => compile_any_match(&mut node_table, &mut stack, &mut next_id),
-            &AST::Blank => (),
-            &AST::Repeat(_, CountModifier::Exact(_)) | &AST::Repeat(_, CountModifier::Range(_)) => {
+            Ast::AnyMatch => compile_any_match(&mut node_table, &mut stack, &mut next_id),
+            &Ast::Blank => (),
+            &Ast::Repeat(_, CountModifier::Exact(_)) | &Ast::Repeat(_, CountModifier::Range(_)) => {
                 panic!("Received complex repeat modifiers, should have been simplified");
             }
         }
