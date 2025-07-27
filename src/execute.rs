@@ -1,5 +1,6 @@
 use crate::compile::{GregExp, Node};
 use std::cell::OnceCell;
+use std::char;
 use std::collections::HashSet;
 use std::rc::{Rc, Weak};
 use thiserror::Error;
@@ -7,7 +8,7 @@ use thiserror::Error;
 #[derive(Debug, Error)]
 pub enum ExecutionError {}
 
-fn add_node(node: &OnceCell<Weak<Node>>, future: &mut HashSet<usize>) {
+fn add_node(node: &OnceCell<Weak<Node>>, future: &mut HashSet<usize>, any_match: &mut bool) {
     let node = match node.get().and_then(Weak::upgrade) {
         Some(node) => node,
         None => return,
@@ -26,29 +27,38 @@ fn add_node(node: &OnceCell<Weak<Node>>, future: &mut HashSet<usize>) {
             future.insert(*id);
         }
         Node::Choice { outs: out, .. } => {
-            add_node(&out[0], future);
-            add_node(&out[1], future);
+            add_node(&out[0], future, any_match);
+            add_node(&out[1], future, any_match);
         }
         Node::Matching { id } => {
             future.insert(*id);
+            *any_match |= true;
         }
     }
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum StepResult {
+    /// Cannot continue, ran out of string to test on
+    OutOfInput,
+    /// Matched at the given position
+    Match { pos: usize },
+    /// Can step more
+    CanStep,
+}
+
 /// The execution state carries information between match iterations
 /// and allows step by step execution of the regex.
-pub struct ExecutionState<'input, 'regex> {
-    input: &'input str,
+pub struct ExecutionState<'regex> {
+    input: Vec<char>,
     current: HashSet<usize>,
     future: HashSet<usize>,
     gregexp: &'regex GregExp,
+    pos: usize,
 }
 
-impl ExecutionState<'_, '_> {
-    fn new<'input, 'gregexp>(
-        input: &'input str,
-        gregexp: &'gregexp GregExp,
-    ) -> ExecutionState<'input, 'gregexp> {
+impl ExecutionState<'_> {
+    fn new<'gregexp>(input: &str, gregexp: &'gregexp GregExp) -> ExecutionState<'gregexp> {
         let mut current: HashSet<usize> = HashSet::new();
         let future: HashSet<usize> = HashSet::new();
 
@@ -60,39 +70,33 @@ impl ExecutionState<'_, '_> {
             .expect("The initial node should exist");
 
         // Every node that is reachable by the first node should be considered.
-        add_node(&first_node, &mut current);
+        add_node(&first_node, &mut current, &mut false);
 
         // Also consider the start node itself
         current.insert(gregexp.start_node_id);
 
         ExecutionState {
-            input,
+            input: input.chars().collect::<Vec<_>>(),
             current,
             future,
             gregexp,
+            pos: 0,
         }
     }
-}
 
-pub fn execute(input: &str, gregexp: &GregExp) -> bool {
-    let mut current: HashSet<usize> = HashSet::new();
-    let mut future: HashSet<usize> = HashSet::new();
+    fn step(&mut self) -> StepResult {
+        let current_char = match self.input.get(self.pos) {
+            Some(c) => *c,
+            None => return StepResult::OutOfInput,
+        };
 
-    let first_node = gregexp
-        .node_table
-        .get(&gregexp.start_node_id)
-        .map(Rc::downgrade)
-        .map(OnceCell::from)
-        .expect("The initial node should exist");
+        let mut any_match = false;
 
-    // Every node that is reachable by the first node should be considered.
-    add_node(&first_node, &mut current);
-
-    // Also consider the start node itself
-    current.insert(gregexp.start_node_id);
-
-    for current_char in input.chars() {
-        for current in current.iter().filter_map(|id| gregexp.node_table.get(id)) {
+        for current in self
+            .current
+            .iter()
+            .filter_map(|id| self.gregexp.node_table.get(id))
+        {
             match current.as_ref() {
                 Node::LiteralMatch {
                     value: matching,
@@ -100,32 +104,56 @@ pub fn execute(input: &str, gregexp: &GregExp) -> bool {
                     ..
                 } => {
                     if *matching == current_char {
-                        add_node(next, &mut future);
+                        add_node(next, &mut self.future, &mut any_match);
                     }
                 }
                 Node::CharsetMatch { charset, next, .. } => {
                     if charset.contains(&current_char) {
-                        add_node(next, &mut future);
+                        add_node(next, &mut self.future, &mut any_match);
                     }
                 }
                 Node::AnyMatch { next, .. } => {
-                    add_node(next, &mut future);
+                    add_node(next, &mut self.future, &mut any_match);
                 }
                 Node::Choice { .. } => continue,
-                Node::Matching { .. } => continue,
+                Node::Matching { .. } => any_match = true,
             }
         }
 
-        current.clear();
-        for node in future.drain() {
-            current.insert(node);
+        self.current.clear();
+        for node in self.future.drain() {
+            self.current.insert(node);
+        }
+
+        // Save the pos in case we matched
+        let pos = self.pos;
+
+        // Move forward
+        self.pos += 1;
+
+        if any_match {
+            StepResult::Match { pos }
+        } else {
+            StepResult::CanStep
         }
     }
+}
 
-    current
-        .iter()
-        .filter_map(|id| gregexp.node_table.get(id))
-        .any(|node| matches!(node.as_ref(), Node::Matching { .. }))
+/// Execute the [GregExp] unto the given string, returning [true] if the string
+/// matches the expression.
+pub fn execute(input: &str, gregexp: &GregExp) -> bool {
+    let mut state = ExecutionState::new(input, gregexp);
+    let mut previous_result = StepResult::CanStep;
+
+    loop {
+        let result = state.step();
+
+        if result == StepResult::OutOfInput {
+            break matches!(previous_result, StepResult::Match { pos: _ });
+        } else {
+            previous_result = result;
+        }
+    }
 }
 
 #[cfg(test)]
