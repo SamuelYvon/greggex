@@ -1,5 +1,6 @@
-use crate::compile::{Gregexp, Node};
+use crate::compile::{GregExp, Node, prefix_with_any_match};
 use std::cell::OnceCell;
+use std::char;
 use std::collections::HashSet;
 use std::rc::{Rc, Weak};
 use thiserror::Error;
@@ -7,8 +8,32 @@ use thiserror::Error;
 #[derive(Debug, Error)]
 pub enum ExecutionError {}
 
-fn add_node(node: &OnceCell<Weak<Node>>, future: &mut HashSet<usize>) {
-    let node = match node.get().map(Weak::upgrade).flatten() {
+#[derive(Debug, PartialEq, Eq)]
+enum StepResult {
+    /// Cannot continue, ran out of string to test on
+    OutOfInput,
+    /// Matched at the given position
+    Match { pos: usize },
+    /// Can step more
+    CanStep,
+}
+
+/// The execution state carries information between match iterations
+/// and allows step by step execution of the regex.
+pub struct ExecutionState<'regex> {
+    input: Vec<char>,
+    current: HashSet<usize>,
+    future: HashSet<usize>,
+    gregexp: &'regex GregExp,
+    pos: usize,
+}
+
+pub struct GregMatches {
+    pub substrs: Vec<(usize, usize)>,
+}
+
+fn add_node(node: &OnceCell<Weak<Node>>, future: &mut HashSet<usize>, any_match: &mut bool) {
+    let node = match node.get().and_then(Weak::upgrade) {
         Some(node) => node,
         None => return,
     };
@@ -26,34 +51,67 @@ fn add_node(node: &OnceCell<Weak<Node>>, future: &mut HashSet<usize>) {
             future.insert(*id);
         }
         Node::Choice { outs: out, .. } => {
-            add_node(&out[0], future);
-            add_node(&out[1], future);
+            add_node(&out[0], future, any_match);
+            add_node(&out[1], future, any_match);
         }
         Node::Matching { id } => {
             future.insert(*id);
+            *any_match |= true;
         }
     }
 }
 
-pub fn execute(input: &str, gregexp: &Gregexp) -> bool {
-    let mut current: HashSet<usize> = HashSet::new();
-    let mut future: HashSet<usize> = HashSet::new();
+impl ExecutionState<'_> {
+    fn new<'gregexp>(input: &str, gregexp: &'gregexp GregExp) -> ExecutionState<'gregexp> {
+        let current: HashSet<usize> = HashSet::new();
+        let future: HashSet<usize> = HashSet::new();
 
-    let first_node = gregexp
-        .node_table
-        .get(&gregexp.start_node_id)
-        .map(Rc::downgrade)
-        .map(OnceCell::from)
-        .expect("The initial node should exist");
+        let mut state = ExecutionState {
+            input: input.chars().collect::<Vec<_>>(),
+            current,
+            future,
+            gregexp,
+            pos: 0,
+        };
 
-    // Every node that is reachable by the first node should be considered.
-    add_node(&first_node, &mut current);
+        state.reset();
 
-    // Also consider the start node itself
-    current.insert(gregexp.start_node_id);
+        state
+    }
 
-    for current_char in input.chars() {
-        for current in current.iter().filter_map(|id| gregexp.node_table.get(id)) {
+    fn reset(&mut self) {
+        for nodeset in [&mut self.current, &mut self.future] {
+            nodeset.clear();
+        }
+
+        let first_node = self
+            .gregexp
+            .node_table
+            .get(&self.gregexp.start_node_id)
+            .map(Rc::downgrade)
+            .map(OnceCell::from)
+            .expect("The initial node should exist");
+
+        // Every node that is reachable by the first node should be considered.
+        add_node(&first_node, &mut self.current, &mut false);
+
+        // Also consider the start node itself
+        self.current.insert(self.gregexp.start_node_id);
+    }
+
+    fn step(&mut self) -> StepResult {
+        let current_char = match self.input.get(self.pos) {
+            Some(c) => *c,
+            None => return StepResult::OutOfInput,
+        };
+
+        let mut any_match = false;
+
+        for current in self
+            .current
+            .iter()
+            .filter_map(|id| self.gregexp.node_table.get(id))
+        {
             match current.as_ref() {
                 Node::LiteralMatch {
                     value: matching,
@@ -61,57 +119,121 @@ pub fn execute(input: &str, gregexp: &Gregexp) -> bool {
                     ..
                 } => {
                     if *matching == current_char {
-                        add_node(&next, &mut future);
+                        add_node(next, &mut self.future, &mut any_match);
                     }
                 }
                 Node::CharsetMatch { charset, next, .. } => {
                     if charset.contains(&current_char) {
-                        add_node(&next, &mut future);
+                        add_node(next, &mut self.future, &mut any_match);
                     }
                 }
                 Node::AnyMatch { next, .. } => {
-                    add_node(&next, &mut future);
+                    add_node(next, &mut self.future, &mut any_match);
                 }
                 Node::Choice { .. } => continue,
-                Node::Matching { .. } => continue,
+                Node::Matching { .. } => any_match = true,
             }
         }
 
-        current.clear();
-        for node in future.drain() {
-            current.insert(node);
+        self.current.clear();
+        for node in self.future.drain() {
+            self.current.insert(node);
+        }
+
+        // Save the pos in case we matched
+        let pos = self.pos;
+
+        // Move forward
+        self.pos += 1;
+
+        if any_match {
+            StepResult::Match { pos }
+        } else {
+            StepResult::CanStep
+        }
+    }
+}
+
+/// Execute the [GregExp] unto the given string, returning [true] if the string
+/// matches the expression.
+pub fn execute(input: &str, gregexp: &GregExp) -> bool {
+    let mut state = ExecutionState::new(input, gregexp);
+    let mut previous_result = StepResult::CanStep;
+
+    loop {
+        let result = state.step();
+
+        if result == StepResult::OutOfInput {
+            break matches!(previous_result, StepResult::Match { pos: _ });
+        } else {
+            previous_result = result;
+        }
+    }
+}
+
+/// Returns [true] if the expression can be matched anywhere in the string at least once.
+pub fn find_anywhere(input: &str, gregexp: &GregExp) -> bool {
+    let gregexp =
+        &prefix_with_any_match(gregexp).expect("Should have been able to transform the regex.");
+
+    execute(input, gregexp)
+}
+
+/// Find all matches of the expression within the string.
+pub fn find_all_matches(input: &str, gregexp: &GregExp) -> GregMatches {
+    let gregexp =
+        &prefix_with_any_match(gregexp).expect("Should have been able to transform the regex.");
+
+    let mut substrs = vec![];
+    let mut match_start = 0;
+
+    let mut state = ExecutionState::new(input, gregexp);
+    let mut previous_result = StepResult::CanStep;
+
+    loop {
+        let result = state.step();
+        match result {
+            StepResult::OutOfInput => {
+                match previous_result {
+                    StepResult::OutOfInput | StepResult::CanStep => (),
+                    StepResult::Match { pos } => substrs.push((match_start, pos)),
+                }
+                break;
+            }
+            StepResult::Match { pos } => {
+                substrs.push((match_start, pos));
+                match_start = pos;
+                previous_result = StepResult::CanStep;
+
+                state.reset();
+            }
+            StepResult::CanStep => (),
         }
     }
 
-    current
-        .iter()
-        .filter_map(|id| gregexp.node_table.get(id))
-        .any(|node| matches!(node.as_ref(), Node::Matching { .. }))
+    GregMatches { substrs }
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::compile::{Gregexp, compile, compile_to_dot};
+    use crate::compile::{GregExp, compile, compile_to_dot};
     use crate::execute::execute;
     use crate::parse::parse;
-    use crate::postfix::postfix;
     use std::fs;
     use std::fs::File;
     use std::io::Write;
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    fn _compile(expr: &str) -> Gregexp {
+    use super::find_all_matches;
+
+    fn _compile(expr: &str) -> GregExp {
         let parsed = parse(expr).unwrap();
-        let postfixd = postfix(&parsed);
-
-        let compiled = compile(&postfixd).unwrap();
-
+        let compiled = compile(parsed).unwrap();
         let compiled_dot = compile_to_dot(&compiled);
-
         let _ = fs::create_dir(".out");
-
         let mut file = File::create(".out/output.dot").expect("");
-        file.write(compiled_dot.as_bytes()).expect("");
+        file.write_all(compiled_dot.as_bytes())
+            .expect("Should be able to write the entirety of the file to disk.");
 
         compiled
     }
@@ -165,9 +287,41 @@ mod tests {
     }
 
     #[test]
+    fn test_or() {
+        let compiled = _compile("([a-z]|[0-9])");
+        assert!(execute("a", &compiled));
+        assert!(execute("z", &compiled));
+        assert!(execute("0", &compiled));
+        assert!(execute("9", &compiled));
+        assert!(!execute("@", &compiled));
+    }
+
+    #[test]
+    fn test_multiple_ors() {
+        let compiled = _compile("([0-1]|[2-3]|[4-5]|[6-7])");
+        assert!(execute("0", &compiled));
+        assert!(execute("1", &compiled));
+        assert!(execute("2", &compiled));
+        assert!(execute("3", &compiled));
+        assert!(execute("4", &compiled));
+        assert!(execute("5", &compiled));
+        assert!(execute("6", &compiled));
+        assert!(execute("7", &compiled));
+        assert!(!execute("8", &compiled));
+        assert!(!execute("9", &compiled));
+    }
+
+    #[test]
+    fn test_dot() {
+        let compiled = _compile("a\\.a");
+        assert!(execute("a.a", &compiled));
+        assert!(!execute("aaa", &compiled));
+    }
+
+    #[test]
     fn a_bad_email_regex() {
         let compiled = _compile(
-            "([a-z]|[A-Z]|[0-9]|[\\._%+-]){1,64}@(([a-z]|[A-Z]|[0-9]){1,63}\\.){1,125}([a-z]|[A-Z]){2,63}",
+            "([a-z]|[A-Z]|[0-9]|[\\._%\\+\\-]){1,64}@(([a-z]|[A-Z]|[0-9]){1,63}\\.){1,125}([a-z]|[A-Z]){2,63}",
         );
         assert!(execute("anemail@host.com", &compiled));
     }
@@ -235,5 +389,18 @@ mod tests {
 
         println!("Min timing: {min}us");
         println!("Max timing: {max}us");
+    }
+
+    #[test]
+    fn test_find_all_matches_simple() {
+        let expr = "hello";
+        let tree = parse(expr).unwrap();
+        let gregexp = compile(tree).unwrap();
+        let matches = find_all_matches(
+            "hello there from the ocean. I say hello!. I said hello!",
+            &gregexp,
+        );
+
+        assert_eq!(matches.substrs.len(), 3, "Unexpected number of matches");
     }
 }
