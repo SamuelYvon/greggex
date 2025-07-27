@@ -63,29 +63,40 @@ fn add_node(node: &OnceCell<Weak<Node>>, future: &mut HashSet<usize>, any_match:
 
 impl ExecutionState<'_> {
     fn new<'gregexp>(input: &str, gregexp: &'gregexp GregExp) -> ExecutionState<'gregexp> {
-        let mut current: HashSet<usize> = HashSet::new();
+        let current: HashSet<usize> = HashSet::new();
         let future: HashSet<usize> = HashSet::new();
 
-        let first_node = gregexp
-            .node_table
-            .get(&gregexp.start_node_id)
-            .map(Rc::downgrade)
-            .map(OnceCell::from)
-            .expect("The initial node should exist");
-
-        // Every node that is reachable by the first node should be considered.
-        add_node(&first_node, &mut current, &mut false);
-
-        // Also consider the start node itself
-        current.insert(gregexp.start_node_id);
-
-        ExecutionState {
+        let mut state = ExecutionState {
             input: input.chars().collect::<Vec<_>>(),
             current,
             future,
             gregexp,
             pos: 0,
+        };
+
+        state.reset();
+
+        state
+    }
+
+    fn reset(&mut self) {
+        for nodeset in [&mut self.current, &mut self.future] {
+            nodeset.clear();
         }
+
+        let first_node = self
+            .gregexp
+            .node_table
+            .get(&self.gregexp.start_node_id)
+            .map(Rc::downgrade)
+            .map(OnceCell::from)
+            .expect("The initial node should exist");
+
+        // Every node that is reachable by the first node should be considered.
+        add_node(&first_node, &mut self.current, &mut false);
+
+        // Also consider the start node itself
+        self.current.insert(self.gregexp.start_node_id);
     }
 
     fn step(&mut self) -> StepResult {
@@ -194,8 +205,7 @@ pub fn find_all_matches(input: &str, gregexp: &GregExp) -> GregMatches {
                 match_start = pos;
                 previous_result = StepResult::CanStep;
 
-                // TODO: when we match, we need to reset the execution state at the same place
-                // TODO  we would be if we started again
+                state.reset();
             }
             StepResult::CanStep => (),
         }
@@ -390,6 +400,7 @@ mod tests {
             "hello there from the ocean. I say hello!. I said hello!",
             &gregexp,
         );
-        dbg!(matches.substrs);
+
+        assert_eq!(matches.substrs.len(), 3, "Unexpected number of matches");
     }
 }

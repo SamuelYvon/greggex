@@ -1,4 +1,5 @@
 use compile::{GregExp, compile_to_dot};
+use execute::GregMatches;
 use parse::ParsingError;
 use thiserror::Error;
 
@@ -36,7 +37,14 @@ pub fn matches(input: &str, expr: &str) -> GreggexResult<bool> {
 }
 
 /// Find all the location in the string where the expression occurs
-pub fn find(input: &str, expr: &GregExp) {}
+pub fn find_all_matches(input: &str, expr: &GregExp) -> GregMatches {
+    execute::find_all_matches(input, expr)
+}
+
+/// Find a match anywhere in the string
+pub fn find_anywhere(input: &str, gregexp: &GregExp) -> bool {
+    execute::find_anywhere(input, gregexp)
+}
 
 /// Compile the expression into a .dot graph. This graph can be exported
 /// to be visualized later.

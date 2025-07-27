@@ -50,9 +50,9 @@ pub fn lex(input: &str) -> Vec<TokenPos> {
         let pos = i as Pos;
 
         let token = match chr {
-            chr if chr >= 'a' && chr <= 'z' => Token::Character(chr),
-            chr if chr >= 'A' && chr <= 'Z' => Token::Character(chr),
-            chr if chr >= '0' && chr <= '9' => Token::Character(chr),
+            chr if chr.is_ascii_lowercase() => Token::Character(chr),
+            chr if chr.is_ascii_uppercase() => Token::Character(chr),
+            chr if chr.is_ascii_digit() => Token::Character(chr),
             chr @ '@' => Token::Character(chr),
             chr @ '!' => Token::Character(chr),
             chr @ '#' => Token::Character(chr),
