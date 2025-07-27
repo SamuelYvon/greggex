@@ -1,4 +1,4 @@
-use crate::compile::{GregExp, Node};
+use crate::compile::{GregExp, Node, prefix_with_any_match};
 use std::cell::OnceCell;
 use std::char;
 use std::collections::HashSet;
@@ -7,6 +7,30 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum ExecutionError {}
+
+#[derive(Debug, PartialEq, Eq)]
+enum StepResult {
+    /// Cannot continue, ran out of string to test on
+    OutOfInput,
+    /// Matched at the given position
+    Match { pos: usize },
+    /// Can step more
+    CanStep,
+}
+
+/// The execution state carries information between match iterations
+/// and allows step by step execution of the regex.
+pub struct ExecutionState<'regex> {
+    input: Vec<char>,
+    current: HashSet<usize>,
+    future: HashSet<usize>,
+    gregexp: &'regex GregExp,
+    pos: usize,
+}
+
+pub struct GregMatches {
+    pub substrs: Vec<(usize, usize)>,
+}
 
 fn add_node(node: &OnceCell<Weak<Node>>, future: &mut HashSet<usize>, any_match: &mut bool) {
     let node = match node.get().and_then(Weak::upgrade) {
@@ -35,26 +59,6 @@ fn add_node(node: &OnceCell<Weak<Node>>, future: &mut HashSet<usize>, any_match:
             *any_match |= true;
         }
     }
-}
-
-#[derive(Debug, PartialEq, Eq)]
-enum StepResult {
-    /// Cannot continue, ran out of string to test on
-    OutOfInput,
-    /// Matched at the given position
-    Match { pos: usize },
-    /// Can step more
-    CanStep,
-}
-
-/// The execution state carries information between match iterations
-/// and allows step by step execution of the regex.
-pub struct ExecutionState<'regex> {
-    input: Vec<char>,
-    current: HashSet<usize>,
-    future: HashSet<usize>,
-    gregexp: &'regex GregExp,
-    pos: usize,
 }
 
 impl ExecutionState<'_> {
@@ -156,6 +160,50 @@ pub fn execute(input: &str, gregexp: &GregExp) -> bool {
     }
 }
 
+/// Returns [true] if the expression can be matched anywhere in the string at least once.
+pub fn find_anywhere(input: &str, gregexp: &GregExp) -> bool {
+    let gregexp =
+        &prefix_with_any_match(gregexp).expect("Should have been able to transform the regex.");
+
+    execute(input, gregexp)
+}
+
+/// Find all matches of the expression within the string.
+pub fn find_all_matches(input: &str, gregexp: &GregExp) -> GregMatches {
+    let gregexp =
+        &prefix_with_any_match(gregexp).expect("Should have been able to transform the regex.");
+
+    let mut substrs = vec![];
+    let mut match_start = 0;
+
+    let mut state = ExecutionState::new(input, gregexp);
+    let mut previous_result = StepResult::CanStep;
+
+    loop {
+        let result = state.step();
+        match result {
+            StepResult::OutOfInput => {
+                match previous_result {
+                    StepResult::OutOfInput | StepResult::CanStep => (),
+                    StepResult::Match { pos } => substrs.push((match_start, pos)),
+                }
+                break;
+            }
+            StepResult::Match { pos } => {
+                substrs.push((match_start, pos));
+                match_start = pos;
+                previous_result = StepResult::CanStep;
+
+                // TODO: when we match, we need to reset the execution state at the same place
+                // TODO  we would be if we started again
+            }
+            StepResult::CanStep => (),
+        }
+    }
+
+    GregMatches { substrs }
+}
+
 #[cfg(test)]
 mod tests {
     use crate::compile::{GregExp, compile, compile_to_dot};
@@ -165,6 +213,8 @@ mod tests {
     use std::fs::File;
     use std::io::Write;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    use super::find_all_matches;
 
     fn _compile(expr: &str) -> GregExp {
         let parsed = parse(expr).unwrap();
@@ -329,5 +379,17 @@ mod tests {
 
         println!("Min timing: {min}us");
         println!("Max timing: {max}us");
+    }
+
+    #[test]
+    fn test_find_all_matches_simple() {
+        let expr = "hello";
+        let tree = parse(expr).unwrap();
+        let gregexp = compile(tree).unwrap();
+        let matches = find_all_matches(
+            "hello there from the ocean. I say hello!. I said hello!",
+            &gregexp,
+        );
+        dbg!(matches.substrs);
     }
 }
