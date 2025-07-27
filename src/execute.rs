@@ -8,7 +8,7 @@ use thiserror::Error;
 pub enum ExecutionError {}
 
 fn add_node(node: &OnceCell<Weak<Node>>, future: &mut HashSet<usize>) {
-    let node = match node.get().map(Weak::upgrade).flatten() {
+    let node = match node.get().and_then(Weak::upgrade) {
         Some(node) => node,
         None => return,
     };
@@ -31,6 +31,45 @@ fn add_node(node: &OnceCell<Weak<Node>>, future: &mut HashSet<usize>) {
         }
         Node::Matching { id } => {
             future.insert(*id);
+        }
+    }
+}
+
+/// The execution state carries information between match iterations
+/// and allows step by step execution of the regex.
+pub struct ExecutionState<'input, 'regex> {
+    input: &'input str,
+    current: HashSet<usize>,
+    future: HashSet<usize>,
+    gregexp: &'regex GregExp,
+}
+
+impl ExecutionState<'_, '_> {
+    fn new<'input, 'gregexp>(
+        input: &'input str,
+        gregexp: &'gregexp GregExp,
+    ) -> ExecutionState<'input, 'gregexp> {
+        let mut current: HashSet<usize> = HashSet::new();
+        let future: HashSet<usize> = HashSet::new();
+
+        let first_node = gregexp
+            .node_table
+            .get(&gregexp.start_node_id)
+            .map(Rc::downgrade)
+            .map(OnceCell::from)
+            .expect("The initial node should exist");
+
+        // Every node that is reachable by the first node should be considered.
+        add_node(&first_node, &mut current);
+
+        // Also consider the start node itself
+        current.insert(gregexp.start_node_id);
+
+        ExecutionState {
+            input,
+            current,
+            future,
+            gregexp,
         }
     }
 }
@@ -61,16 +100,16 @@ pub fn execute(input: &str, gregexp: &GregExp) -> bool {
                     ..
                 } => {
                     if *matching == current_char {
-                        add_node(&next, &mut future);
+                        add_node(next, &mut future);
                     }
                 }
                 Node::CharsetMatch { charset, next, .. } => {
                     if charset.contains(&current_char) {
-                        add_node(&next, &mut future);
+                        add_node(next, &mut future);
                     }
                 }
                 Node::AnyMatch { next, .. } => {
-                    add_node(&next, &mut future);
+                    add_node(next, &mut future);
                 }
                 Node::Choice { .. } => continue,
                 Node::Matching { .. } => continue,
@@ -105,7 +144,8 @@ mod tests {
         let compiled_dot = compile_to_dot(&compiled);
         let _ = fs::create_dir(".out");
         let mut file = File::create(".out/output.dot").expect("");
-        file.write(compiled_dot.as_bytes()).expect("");
+        file.write_all(compiled_dot.as_bytes())
+            .expect("Should be able to write the entirety of the file to disk.");
 
         compiled
     }

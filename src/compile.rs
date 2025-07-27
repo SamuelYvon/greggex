@@ -18,6 +18,8 @@ pub enum CompilationError {
     DoubleSetOutput(usize),
     #[error("Incomplete postfix expression, expected a single node, found {0}")]
     InvalidPostfix(usize),
+    #[error("Node with id {0} does not exist in the table")]
+    MissingNode(usize),
 }
 
 pub type CompilationResult<T> = Result<T, CompilationError>;
@@ -331,9 +333,74 @@ fn attach_matching_node(
 
     let matching = Rc::new(Node::Matching { id: next_id });
     node_table.insert(next_id, matching.clone());
-    attach_all(&last, &matching, &node_table)?;
+    attach_all(&last, &matching, node_table)?;
 
     Ok(last.node.id())
+}
+
+/// Dispatches every element of the Ast, received in postfix order and creates the appropriate node for it.
+fn compile_loop(
+    stack: &mut Vec<Fragment>,
+    node_table: &mut NodeTable,
+    next_id: &mut usize,
+    traversal: &[Rc<Ast>],
+) -> CompilationResult<()> {
+    for segment in traversal.iter() {
+        match segment.as_ref() {
+            Ast::ExactMatch(c) => compile_character(*c, node_table, stack, next_id),
+            Ast::Concat(_, _) => compile_concat(node_table, stack)?,
+            Ast::Or(_, _) => compile_or(node_table, stack, next_id)?,
+            Ast::Repeat(_, CountModifier::AtMostOnce) => {
+                compile_at_most_once(node_table, stack, next_id)?
+            }
+            Ast::Repeat(_, CountModifier::AtLeastOnce) => {
+                compile_at_least_once(node_table, stack, next_id)?
+            }
+            Ast::Repeat(_, CountModifier::Star) => compile_star(node_table, stack, next_id)?,
+            Ast::InGroup(charset) => compile_charset(charset.clone(), node_table, stack, next_id),
+            Ast::AnyMatch => compile_any_match(node_table, stack, next_id),
+            &Ast::Blank => (),
+            &Ast::Repeat(_, CountModifier::Exact(_)) | &Ast::Repeat(_, CountModifier::Range(_)) => {
+                panic!("Received complex repeat modifiers, should have been simplified");
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Prefix an expression with an "any match" expression. For example, if you have a compiled
+/// expression
+// TODO WRITE DOC
+pub fn prefix_with_any_match(original: &GregExp) -> CompilationResult<GregExp> {
+    let mut node_table = original.node_table.clone();
+    let mut next_id = node_table.keys().max().cloned().map(|v| v + 1).unwrap_or(0);
+    let mut stack: Vec<Fragment> = vec![];
+
+    let traversal = [
+        Rc::new(Ast::AnyMatch),
+        Rc::new(Ast::Repeat(Rc::new(Ast::AnyMatch), CountModifier::Star)),
+    ];
+
+    compile_loop(&mut stack, &mut node_table, &mut next_id, &traversal)?;
+
+    assert!(
+        stack.len() == 1,
+        "There should be only a single node on the stack"
+    );
+
+    let from = &stack[0];
+
+    let previous_head = node_table
+        .get(&original.start_node_id)
+        .ok_or(CompilationError::MissingNode(original.start_node_id))?;
+
+    attach_all(from, previous_head, &node_table)?;
+
+    Ok(GregExp {
+        node_table,
+        start_node_id: from.node.id(),
+    })
 }
 
 pub fn compile(tree: Rc<Ast>) -> CompilationResult<GregExp> {
@@ -344,30 +411,12 @@ pub fn compile(tree: Rc<Ast>) -> CompilationResult<GregExp> {
     let mut postfix_traversal: Vec<Rc<Ast>> = Vec::new();
     tree.into_postfix(&mut postfix_traversal);
 
-    for segment in postfix_traversal.into_iter() {
-        match segment.as_ref() {
-            Ast::ExactMatch(c) => compile_character(*c, &mut node_table, &mut stack, &mut next_id),
-            Ast::Concat(_, _) => compile_concat(&node_table, &mut stack)?,
-            Ast::Or(_, _) => compile_or(&mut node_table, &mut stack, &mut next_id)?,
-            Ast::Repeat(_, CountModifier::AtMostOnce) => {
-                compile_at_most_once(&mut node_table, &mut stack, &mut next_id)?
-            }
-            Ast::Repeat(_, CountModifier::AtLeastOnce) => {
-                compile_at_least_once(&mut node_table, &mut stack, &mut next_id)?
-            }
-            Ast::Repeat(_, CountModifier::Star) => {
-                compile_star(&mut node_table, &mut stack, &mut next_id)?
-            }
-            Ast::InGroup(charset) => {
-                compile_charset(charset.clone(), &mut node_table, &mut stack, &mut next_id)
-            }
-            Ast::AnyMatch => compile_any_match(&mut node_table, &mut stack, &mut next_id),
-            &Ast::Blank => (),
-            &Ast::Repeat(_, CountModifier::Exact(_)) | &Ast::Repeat(_, CountModifier::Range(_)) => {
-                panic!("Received complex repeat modifiers, should have been simplified");
-            }
-        }
-    }
+    compile_loop(
+        &mut stack,
+        &mut node_table,
+        &mut next_id,
+        &postfix_traversal,
+    )?;
 
     let start_node_id = attach_matching_node(&mut stack, &mut node_table, next_id)?;
 
@@ -391,7 +440,7 @@ pub fn compile_to_dot(exp: &GregExp) -> String {
     for node in nodes.values() {
         match node.as_ref() {
             Node::LiteralMatch { id, next, value } => {
-                let next = next.get().map(Weak::upgrade).flatten();
+                let next = next.get().and_then(Weak::upgrade);
 
                 if next.is_none() {
                     panic!("Expected a next link ({id}, {value})");
@@ -402,8 +451,7 @@ pub fn compile_to_dot(exp: &GregExp) -> String {
             Node::CharsetMatch { id, next, charset } => {
                 let next = next
                     .get()
-                    .map(Weak::upgrade)
-                    .flatten()
+                    .and_then(Weak::upgrade)
                     .expect("Expected a next link");
 
                 for value in charset {
@@ -413,15 +461,14 @@ pub fn compile_to_dot(exp: &GregExp) -> String {
             Node::AnyMatch { id, next } => {
                 let next = next
                     .get()
-                    .map(Weak::upgrade)
-                    .flatten()
+                    .and_then(Weak::upgrade)
                     .expect("Expected a next link");
 
                 builder += &format!("\ta{id} -> a{0}[label=\"<any>\"]\n", next.id());
             }
             Node::Choice { id, outs } => {
                 for out in outs {
-                    match out.get().map(Weak::upgrade).flatten() {
+                    match out.get().and_then(Weak::upgrade) {
                         None => continue,
                         Some(next) => {
                             builder += &format!("\ta{id} -> a{0}\n", next.id());
@@ -439,4 +486,25 @@ pub fn compile_to_dot(exp: &GregExp) -> String {
 }
 
 #[cfg(test)]
-mod tests {}
+mod tests {
+    use crate::{execute, parse::parse};
+
+    use super::{compile, prefix_with_any_match};
+
+    #[test]
+    fn test_adding_matchall_prefix() {
+        let expr = "hello";
+        let tree = parse(expr).unwrap();
+        let original = compile(tree).unwrap();
+        let prefixed = prefix_with_any_match(&original).unwrap();
+
+        // Positive cases
+        assert!(execute("hello", &prefixed));
+        assert!(execute("ahello", &prefixed));
+        assert!(execute("aahello", &prefixed));
+
+        // Negative cases
+        assert!(!execute("aahell", &prefixed));
+        assert!(!execute("aahellxx", &prefixed));
+    }
+}

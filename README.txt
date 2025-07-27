@@ -11,7 +11,7 @@ Some help from
  <any-match> : .
  <group> : (<expr>(|<expr>)*)
  <char> : 0-9, a-z, A-Z, !@#$%&*, \<escaped char>
- <char-group> : [ <range-expr> | <char>* ]
+ <char-group> : [ (<range-expr> | <char>)* ]
  <range-expr> : a-a
  <escaped-char>: ,^,$,{,},(,),[,],
- <modifier>: *,+,{l,h}
+ <modifier>: *,+,{l,h},{e}
